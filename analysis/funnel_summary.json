@@ -1,0 +1,24 @@
+{
+ "bars": 354393,
+ "dow_state_bars": {
+  "UNDEFINED": 27,
+  "DOWN": 121708,
+  "DOWN_SUSPECT": 51667,
+  "UP": 130677,
+  "UP_SUSPECT": 50314
+ },
+ "plans_issued": 12788,
+ "gateway_stats": {
+  "POLICY:NO_GO": 2117,
+  "GUARDRAIL:NO_GO": 10671
+ },
+ "guardrail_reasons": {
+  "L1_FAILURE: CacheMissError": 10671
+ },
+ "risk_approvals": 0,
+ "risk_rejections": {},
+ "orders_placed": 0,
+ "trades": [],
+ "total_pnl": 0,
+ "max_dd": 0
+}

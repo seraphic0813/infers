@@ -2,11 +2,13 @@
 
 このファイルは Claude Code が本プロジェクトで作業する際に常に参照する開発規約。
 詳細設計は [docs/phase1-architecture.md](docs/phase1-architecture.md)(以下「設計書」)が唯一の正であり、本書と矛盾した場合は設計書を優先しつつ本書を更新すること。
+**ただしエントリー判定ロジックに限り [docs/entry-methodology.md](docs/entry-methodology.md) が最優先の正**(設計書の旧エントリー記述より優先)。
 
 ## プロジェクト概要
 
 - **システム名**: INFERS (Intelligent Narrow Focus Elliot Realtime System)
-- **目的**: 「Narrow Focus トレード手法」(ダウ理論+エリオット波動+フィボナッチのマクロ分析 × 90/200SMA・RSI・レジサポのミクロ分析、および未来裁量)を Python 自動取引Bot+長期バックテストとして実装する
+- **目的**: 「Narrow Focus トレード手法」を Python 自動取引Bot+長期バックテストとして実装する
+- **エントリー手法(正は [docs/entry-methodology.md](docs/entry-methodology.md))**: 3ゲート構成 — ①マクロ環境認識(**ダウ理論(D1/H1)で方向を確定**、200SMA位置で確認。逆方向を100%遮断)→ ②コンフルエンス(ダウ順行・**200SMAグランビル**・90SMAグランビル・水平レジサポ・**RSIマルチTF(M5/H1/D1)**・**40%深さスクリーニング** が規定数以上重複)→ ③ニュース遮断(重要指標±30分は全面見送り)。エリオット波動は第2波の構造文脈、フィボは**押し目ゾーン特定+利確目標161.8%**(エントリー加点にはしない)。40%深さは原典に無いシステム化の追加フィルター
 - **対象**: BTCUSD (Vantage Trading)、XAUUSD (Swift Trader) — いずれも MT4/MT5系ブローカー
 - **構成**: データ層 → 分析層(マクロ/ミクロ/未来裁量) → シグナル統合 → AIゲート(L1/L2) → リスクマネージャー → 執行。詳細は設計書 §1
 

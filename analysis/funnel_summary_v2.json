@@ -1,0 +1,67 @@
+{
+ "bars": 354393,
+ "dow_state_bars": {
+  "UNDEFINED": 27,
+  "DOWN": 121708,
+  "DOWN_SUSPECT": 51667,
+  "UP": 130677,
+  "UP_SUSPECT": 50314
+ },
+ "plans_issued": 18070,
+ "gateway_stats": {
+  "CACHE:NO_GO": 11868,
+  "CACHE:WAIT": 5920,
+  "POLICY:NO_GO": 258,
+  "CACHE:GO": 24
+ },
+ "guardrail_reasons": {},
+ "risk_approvals": 24,
+ "risk_rejections": {},
+ "orders_placed": 24,
+ "trades": [
+  {
+   "pid": "XAUUSD/M5/2021-06-21T15:20:00+00:00",
+   "dir": -1,
+   "pnl": -1214,
+   "exit": "SL"
+  },
+  {
+   "pid": "XAUUSD/M5/2022-03-23T18:50:00+00:00",
+   "dir": -1,
+   "pnl": -552,
+   "exit": "SL"
+  },
+  {
+   "pid": "XAUUSD/M5/2025-06-10T05:25:00+00:00",
+   "dir": 1,
+   "pnl": -1192,
+   "exit": "SL"
+  },
+  {
+   "pid": "XAUUSD/M5/2025-10-31T12:30:00+00:00",
+   "dir": -1,
+   "pnl": -3114,
+   "exit": "SL"
+  },
+  {
+   "pid": "XAUUSD/M5/2025-12-29T16:20:00+00:00",
+   "dir": 1,
+   "pnl": -1242,
+   "exit": "SL"
+  },
+  {
+   "pid": "XAUUSD/M5/2026-02-09T22:30:00+00:00",
+   "dir": 1,
+   "pnl": -3538,
+   "exit": "SL"
+  },
+  {
+   "pid": "XAUUSD/M5/2022-12-23T19:55:00+00:00",
+   "dir": 1,
+   "pnl": 232859,
+   "exit": "CLOSE"
+  }
+ ],
+ "total_pnl": 222007,
+ "max_dd": 10852
+}

@@ -98,8 +98,14 @@ def build_provider(args: argparse.Namespace) -> SignalProvider:
     """
     if args.provider:
         return load_provider(args.provider)
-    from infers.strategy.provider import InfersSignalProvider
-    return InfersSignalProvider(symbol=args.symbol, tf=Timeframe(args.tf))
+    from infers.strategy.provider import InfersSignalProvider, ProviderConfig
+    cfg = ProviderConfig(macro_filter=not args.no_macro_filter,
+                         macro_tf=Timeframe(args.macro_tf),
+                         score_fib=not args.no_fib_score,
+                         depth_screen=args.depth_screen,
+                         macro_wave2=args.macro_wave2,
+                         be_sl_macro_tf=args.be_sl_macro_tf)
+    return InfersSignalProvider(symbol=args.symbol, tf=Timeframe(args.tf), config=cfg)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -162,6 +168,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="3倍スワップ曜日 (月=0..日=6, 既定=2=水)。-1で無効")
     p.add_argument("--no-swap", action="store_true",
                    help="スワップを計上しない (スプレッドのみ)")
+    # マクロ方向フィルター (設計書 §1 フラクタル)
+    p.add_argument("--macro-tf", choices=[t.value for t in Timeframe], default="H4",
+                   help="方向を見定めるマクロ足 (既定 H4)。エントリーはマクロ方向一致時のみ")
+    p.add_argument("--no-macro-filter", action="store_true",
+                   help="マクロ方向フィルターを無効化 (ミクロ単独方向の従来挙動)")
+    p.add_argument("--no-fib-score", action="store_true",
+                   help="FIBをコンフルエンス・スコアから除外 (中核根拠の水増し防止)")
+    p.add_argument("--depth-screen", action="store_true",
+                   help="深さスクリーニング(下方40パーセントの深い押し目のみ)を有効化。本物の第2波が前提")
+    p.add_argument("--macro-wave2", action="store_true",
+                   help="上位足(--macro-tf)のエリオットで第2波を判定 (M5ノイズでなく本物の波)")
+    p.add_argument("--be-sl-macro-tf", action="store_true",
+                   help="建値SL移動を上位足ダウ構造で行う (現結合では利確パイプラインが停止しやすい)")
     # 安全ガード (設計書 §11: デモ→最小ロットの段階を必ず踏む)
     p.add_argument("--demo", action="store_true", default=True,
                    help="デモ口座モード (既定)")

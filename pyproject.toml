@@ -1,0 +1,26 @@
+[project]
+name = "infers"
+version = "0.1.0"
+description = "INFERS — Intelligent Narrow Focus Elliot Realtime System"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+live = ["MetaTrader5"]      # Windows専用。バックテスト/CIでは不要(import遅延)
+dev = ["pytest>=8", "hypothesis>=6"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+    "property: hypothesisによるプロパティベーステスト",
+]
