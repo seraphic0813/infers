@@ -1,0 +1,42 @@
+# 環境・機密情報
+.env
+.env.local
+credentials.json
+secrets.yaml
+*.key
+*.pem
+
+# APIキー・口座資格情報 (CLAUDE.md: コード・設定ファイルに書かない)
+config/secrets/
+**/api_key*
+**/token*
+
+# 作業フォルダ: Batches API・キャッシュ・デバッグ
+/work/
+
+# 開発環境
+.venv
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ローカル開発・テスト
+*.tmp
+test_output/
