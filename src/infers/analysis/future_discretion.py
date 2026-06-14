@@ -206,12 +206,19 @@ def build_future_map(
     fib_tol_ticks: int = 1,
     min_families: int = 2,
     score_fib: bool = True,                # False: FIBをコンフルエンス・スコアから除外
+    htf_rsi_extreme: int = 0,              # 上位足(H1/D1)RSIが方向にトリガーしたTF数 (到達/反発: G2-⑤)
 ) -> list[FutureCell]:
     """(k, P) グリッドを評価し、根拠 >=2 family のセルだけを返す (純粋関数)。
 
     family は確定済みコンフルエンス (confluence.py) と同じ思想で数える:
     複数SMA期間のヒットも "SMA" 1 family。マニュアル3.4 の絶対条件
     (根拠2つ以上) を未来時点にもそのまま適用する。
+
+    RSI はマルチTF (手法G2-⑤): M5 は (k,P) 到達時の前方バンド、上位足(H1/D1)は
+    「極値圏に到達、またはそこから反発/反落した直後」のTF数を `htf_rsi_extreme`
+    で受け取る (判定は呼び出し側の RsiExtremeRecency)。M5・上位足のいずれかが
+    トリガーすれば "RSI" family 成立、重なるほど score を加点する
+    (「複数TFで重なるほど強い」)。
     """
     if direction not in (+1, -1):
         raise ValueError("direction must be +1 or -1")
@@ -224,18 +231,25 @@ def build_future_map(
             families: list[str] = []
             score = Decimal(0)
 
-            # --- RSI極値バンド ---
+            # --- RSI極値 (マルチTF: M5前方バンド + 上位足H1/D1の現在極値) ---
             band = rsi_band(rsi_state, p, k)
             if direction > 0:
                 certain, possible = band.oversold_certain, band.oversold_possible
             else:
                 certain, possible = band.overbought_certain, band.overbought_possible
+            rsi_hit = False
             if certain:
-                families.append("RSI")
+                rsi_hit = True
                 score += 1
             elif possible:
-                families.append("RSI")
+                rsi_hit = True
                 score += Decimal("0.5")
+            # 上位足RSIの極値は (k,P) に依存しない定数。重なる足数だけ 0.5 ずつ加点
+            if htf_rsi_extreme > 0:
+                rsi_hit = True
+                score += Decimal("0.5") * htf_rsi_extreme
+            if rsi_hit:
+                families.append("RSI")
 
             # --- SMA接触 (期間が複数ヒットしても 1 family) ---
             sma_hit = False

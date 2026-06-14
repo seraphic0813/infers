@@ -99,8 +99,12 @@ def build_provider(args: argparse.Namespace) -> SignalProvider:
     if args.provider:
         return load_provider(args.provider)
     from infers.strategy.provider import InfersSignalProvider, ProviderConfig
+    rsi_mtfs = (() if args.no_rsi_mtf
+                else tuple(Timeframe(t) for t in args.rsi_mtf))
     cfg = ProviderConfig(macro_filter=not args.no_macro_filter,
                          macro_tf=Timeframe(args.macro_tf),
+                         wave2_tf=Timeframe(args.wave2_tf),
+                         rsi_macro_tfs=rsi_mtfs,
                          score_fib=not args.no_fib_score,
                          depth_screen=args.depth_screen,
                          macro_wave2=args.macro_wave2,
@@ -169,8 +173,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--no-swap", action="store_true",
                    help="スワップを計上しない (スプレッドのみ)")
     # マクロ方向フィルター (設計書 §1 フラクタル)
-    p.add_argument("--macro-tf", choices=[t.value for t in Timeframe], default="H4",
-                   help="方向を見定めるマクロ足 (既定 H4)。エントリーはマクロ方向一致時のみ")
+    p.add_argument("--macro-tf", choices=[t.value for t in Timeframe], default="D1",
+                   help="方向を見定めるマクロ足 (既定 D1。手法ゲート1=D1/H1)。"
+                        "エントリーはマクロ方向一致時のみ")
+    p.add_argument("--wave2-tf", choices=[t.value for t in Timeframe], default="H4",
+                   help="第2波(押し目)カウント用のマクロ足 (既定 H4)。方向TFと独立。"
+                        "--macro-wave2 有効時に使用")
+    p.add_argument("--rsi-mtf", nargs="*", choices=[t.value for t in Timeframe],
+                   default=["H1", "D1"],
+                   help="RSIマルチTFコンフルエンスに使う上位足 (既定 H1 D1。手法G2-⑤)")
+    p.add_argument("--no-rsi-mtf", action="store_true",
+                   help="RSIマルチTFを無効化 (M5単独RSIの従来挙動)")
     p.add_argument("--no-macro-filter", action="store_true",
                    help="マクロ方向フィルターを無効化 (ミクロ単独方向の従来挙動)")
     p.add_argument("--no-fib-score", action="store_true",
@@ -178,7 +191,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--depth-screen", action="store_true",
                    help="深さスクリーニング(下方40パーセントの深い押し目のみ)を有効化。本物の第2波が前提")
     p.add_argument("--macro-wave2", action="store_true",
-                   help="上位足(--macro-tf)のエリオットで第2波を判定 (M5ノイズでなく本物の波)")
+                   help="上位足(--wave2-tf)のエリオットで第2波を判定 (M5ノイズでなく本物の波)")
     p.add_argument("--be-sl-macro-tf", action="store_true",
                    help="建値SL移動を上位足ダウ構造で行う (現結合では利確パイプラインが停止しやすい)")
     # 安全ガード (設計書 §11: デモ→最小ロットの段階を必ず踏む)

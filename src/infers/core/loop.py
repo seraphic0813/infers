@@ -55,6 +55,7 @@ class ProviderOutput:
     structure_events: list[StructureEvent] = field(default_factory=list)
     rsi_value: Decimal | None = None              # 現在RSI (半分利確トリガー: §6.4)
     tp_sr_zones: tuple[SRZone, ...] = ()          # 重要SRゾーン (半分利確トリガー: §6.4)
+    sma90_int: int | None = None                  # 90SMA値 (半分利確トリガー: ③-1)
 
 
 class SignalProvider(Protocol):
@@ -115,8 +116,9 @@ class TradingLoop:
                 fsm.on_wave1_break(candle, plan.w1_high_int,
                                    add_volume_steps=plan.add_volume_steps)
             if fsm.state is PosState.SL_AT_BE:
-                # 半分利確: RSI利確圏 or 重要SRゾーン到達 (設計書 §6.4)
-                fsm.on_half_tp_signal(candle, output.rsi_value, output.tp_sr_zones)
+                # 半分利確: RSI利確圏 / 90SMA接触 / 重要SRゾーン到達 (③-1)
+                fsm.on_half_tp_signal(candle, output.rsi_value, output.tp_sr_zones,
+                                      output.sma90_int)
             elif fsm.state is PosState.RUNNER:
                 # 残玉決済 (entry-methodology.md ③-2): ランナーはフィボ目標まで伸ばし、
                 # 下方は建値SLで保護する。ダウ転換クローズは手法に無いため既定で行わない

@@ -223,6 +223,36 @@ class TestFutureMap:
         assert cells[0].families.count("SMA") == 1
         assert set(cells[0].families) == {"RSI", "SMA"}
 
+    def test_htf_rsi_extreme_adds_rsi_family(self):
+        """上位足RSI極値 (htf_rsi_extreme>=1) で RSI family が成立し SR単独セルが残る。
+
+        M5は neutral で極値に達しないが、上位足(H1/D1)RSIが売られすぎなら RSI を
+        加点する。SR(1)+htf(0.5) = 2 family を満たす (手法G2-⑤ マルチTF RSI)。
+        """
+        # price 950 は M5 前方バンド lo≈32 (>30) で oversold に達しない中立域。
+        # よって M5 単独では RSI family は立たず、上位足の寄与のみを切り出せる。
+        base = dict(closes=[1000] * 120, rsi_state=flat_state(), direction=+1,
+                    k_range=range(4, 5), prices=[950],
+                    sr_zones=[SRZone(low_int=945, high_int=955, touches=2,
+                                     strength=Decimal("1.5"), role="SUPPORT")])
+        # 上位足RSI極値なし → SR 1 family のみ → 足切り
+        assert build_future_map(**base, htf_rsi_extreme=0) == []
+        # 上位足RSI極値1つ → RSI family追加で成立
+        cells = build_future_map(**base, htf_rsi_extreme=1)
+        assert len(cells) == 1
+        assert set(cells[0].families) == {"SR", "RSI"}
+        assert cells[0].score == Decimal("1.5")        # SR(1)+htf(0.5)
+
+    def test_htf_rsi_extreme_multi_tf_scores_higher(self):
+        """複数の上位足が極値だと score が積み増される (重なるほど強い: G2-⑤)。"""
+        base = dict(closes=[1000] * 120, rsi_state=flat_state(), direction=+1,
+                    k_range=range(4, 7), prices=[950],
+                    sr_zones=[SRZone(low_int=945, high_int=955, touches=2,
+                                     strength=Decimal("1.5"), role="SUPPORT")])
+        one = build_future_map(**base, htf_rsi_extreme=1)[0]
+        two = build_future_map(**base, htf_rsi_extreme=2)[0]
+        assert two.score == one.score + Decimal("0.5")
+
 
 class TestProposeLimitOrders:
     BAR = timedelta(minutes=5)

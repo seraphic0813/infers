@@ -452,6 +452,13 @@ function select(i) {
   // 詳細パネル
   const v = t.verdict ?? {};
   const f = t.features;
+  // 手法検証用の派生値 (押し目深さ / 半分利確トリガー / 方向)
+  const dir = t.dir;
+  const swHi = Math.max(p.w1_high, p.w1_low), swLo = Math.min(p.w1_high, p.w1_low);
+  const swSpan = swHi - swLo;
+  const depth = swSpan > 0 ? (dir > 0 ? (p.limit - swLo) : (swHi - p.limit)) / swSpan : 0;
+  const depthOk = depth <= 0.40 ? "✓深い(40%以内)" : "△浅い(40%超)";
+  const halfTrig = (t.journal.find(([n]) => n === "HALF_TAKE_PROFIT") || [null, {}])[1].trigger || "—";
   const journey = t.journal.map(([n, pl]) => {
     const ps = Object.entries(pl).filter(([k]) => k !== "state")
       .map(([k, x]) => `${k}=${x}`).join(", ");
@@ -466,7 +473,11 @@ function select(i) {
       <div class="k">ゲート判定</div><div>${v.decision ?? "-"} (conf=${v.confidence ?? "-"},
         source=${v.source ?? "-"})</div>
       <div class="k">判定理由</div><div><ul>${(v.reasons ?? []).map(r => `<li>${r}</li>`).join("")}</ul></div>
-      <div class="k">families</div><div>${f.families} (cluster_score=${f.cluster_score})</div>
+      <div class="k">方向 / マクロ</div><div>${dir > 0 ? "買い" : "売り"} (ダウ ${f.dow_state}) /
+        マクロダウ ${f.macro_dow ?? "-"} / 第2波TF ${f.wave2_tf ?? "M5"}</div>
+      <div class="k">コンフルエンス</div><div>${f.families} (cluster_score=${f.cluster_score})</div>
+      <div class="k">押し目/戻り深さ</div><div>${(depth * 100).toFixed(1)}% (基準=直近スイング高安) ${depthOk}</div>
+      <div class="k">半分利確トリガー</div><div>${halfTrig} (RSI / SMA90 / SR のいずれか)</div>
       <div class="k">rsi / band</div><div>現在 ${f.rsi} → 到達予測 ${f.rsi_band} (eta ${f.eta_bars} 本)</div>
       <div class="k">ambiguity</div><div>${f.ambiguity}</div>
       <div class="k">価格構造</div><div>limit ${px(t.plan.limit).toFixed(2)} /

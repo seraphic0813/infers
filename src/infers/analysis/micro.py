@@ -159,3 +159,48 @@ class RsiExtremeDetector:
         fired = zone if zone is not None and zone != self._prev_zone else None
         self._prev_zone = zone
         return fired
+
+
+# 上位足RSIトリガーの既定リバウンド許容窓 (手法G2-⑤)。
+# 押し目/戻りが完成する頃には上位足RSIが極値から戻っている (反発/反落) ため、
+# 「今まさに圏内」だけでなく直近 lookback 本以内の圏内到達も有効トリガーとする。
+RSI_REVERSAL_LOOKBACK = 3
+
+
+class RsiExtremeRecency:
+    """RSI が「極値圏に到達」または「そこから反発/反落した直後」かを判定する。
+
+    手法G2-⑤の上位足RSIトリガーは「≤30(買)/≥70(売)に到達、**または
+    そこから反発/反落**」で成立する。現在値が圏内 (到達) でも、圏外へ抜けた
+    直後 (反発/反落) でも、最後に圏内だった確定足からの経過本数が lookback 以内
+    なら active=True を返す (lookback=0 で従来の「現在圏内のみ」と等価)。
+
+    確定足の RSI のみ update() する (リペイント禁止: CLAUDE.md 第2条)。
+    買い (direction>0) は売られすぎ、売り (direction<0) は買われすぎを参照。
+    """
+
+    def __init__(self, lookback: int = RSI_REVERSAL_LOOKBACK) -> None:
+        if lookback < 0:
+            raise ValueError("lookback must be >= 0")
+        self._lookback = lookback
+        self._since_oversold: int | None = None
+        self._since_overbought: int | None = None
+
+    def update(self, rsi: Decimal) -> None:
+        zone = classify_rsi(rsi)
+        self._since_oversold = (
+            0 if zone == "OVERSOLD"
+            else None if self._since_oversold is None
+            else self._since_oversold + 1
+        )
+        self._since_overbought = (
+            0 if zone == "OVERBOUGHT"
+            else None if self._since_overbought is None
+            else self._since_overbought + 1
+        )
+
+    def active(self, direction: int) -> bool:
+        if direction not in (+1, -1):
+            raise ValueError("direction must be +1 or -1")
+        since = self._since_oversold if direction > 0 else self._since_overbought
+        return since is not None and since <= self._lookback

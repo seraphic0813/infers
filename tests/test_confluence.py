@@ -7,7 +7,8 @@ import pytest
 
 from infers.analysis.confluence import ConfluenceCluster, Evidence, Family, find_clusters
 from infers.analysis.micro import (
-    GranvilleDetector, RsiExtremeDetector, classify_rsi, normalized_deviation, sma_slope,
+    GranvilleDetector, RsiExtremeDetector, RsiExtremeRecency, classify_rsi,
+    normalized_deviation, sma_slope,
 )
 from infers.analysis.support_resistance import build_zones
 from infers.analysis.zigzag import SwingPoint
@@ -125,6 +126,48 @@ class TestRsiExtreme:
         assert det.update(Decimal(25)) is None         # 圏内継続では再発火しない
         assert det.update(Decimal(35)) is None          # 圏外へ
         assert det.update(Decimal(29)) == "OVERSOLD"   # 再突入で再発火
+
+
+class TestRsiExtremeRecency:
+    """G2-⑤「≤30/≥70 到達、またはそこから反発/反落」の判定 (上位足RSI)。"""
+
+    def test_active_while_in_zone(self):
+        rec = RsiExtremeRecency(lookback=3)
+        rec.update(Decimal(28))                     # 売られすぎ到達
+        assert rec.active(+1) is True               # 買い方向で有効
+        assert rec.active(-1) is False              # 売り方向では無効
+
+    def test_active_after_bounce_within_lookback(self):
+        """圏外へ反発した直後も lookback 本以内なら有効 (反発/反落トリガー)。"""
+        rec = RsiExtremeRecency(lookback=3)
+        rec.update(Decimal(28))                     # 到達 (since=0)
+        rec.update(Decimal(33))                     # 反発1本目 (since=1)
+        rec.update(Decimal(36))                     # 反発2本目 (since=2)
+        rec.update(Decimal(40))                     # 反発3本目 (since=3)
+        assert rec.active(+1) is True               # lookback=3 以内
+        rec.update(Decimal(45))                     # 4本目 (since=4)
+        assert rec.active(+1) is False              # 窓を超えて失効
+
+    def test_never_reached_is_inactive(self):
+        rec = RsiExtremeRecency(lookback=3)
+        rec.update(Decimal(50))
+        rec.update(Decimal(45))
+        assert rec.active(+1) is False
+        assert rec.active(-1) is False
+
+    def test_lookback_zero_is_current_only(self):
+        """lookback=0 は従来の「現在圏内のみ」と等価。"""
+        rec = RsiExtremeRecency(lookback=0)
+        rec.update(Decimal(28))
+        assert rec.active(+1) is True
+        rec.update(Decimal(33))                     # 圏外へ抜けたら即失効
+        assert rec.active(+1) is False
+
+    def test_overbought_direction(self):
+        rec = RsiExtremeRecency(lookback=2)
+        rec.update(Decimal(72))                     # 買われすぎ到達
+        assert rec.active(-1) is True               # 売り方向で有効
+        assert rec.active(+1) is False
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,12 @@ from infers.analysis.dow import DowStateMachine, StructureEvent, TrendState
 from infers.analysis.elliot import ElliottCounter, ElliottView, WaveCount
 from infers.analysis.future_discretion import build_future_map, propose_limit_orders
 from infers.analysis.indicators import ATR, SMA, WilderRSI
+from infers.analysis.micro import (
+    RSI_OVERBOUGHT,
+    RSI_OVERSOLD,
+    RSI_REVERSAL_LOOKBACK,
+    RsiExtremeRecency,
+)
 from infers.analysis.support_resistance import build_zones
 from infers.analysis.zigzag import SwingPoint, ZigZagDetector
 from infers.core.loop import ProviderOutput, TradePlan
@@ -125,6 +131,10 @@ class ProviderConfig:
     k_atr_reversal: Decimal = Decimal("1.5")    # ZigZag反転閾値 = k × ATR
     sma_periods: tuple[int, ...] = (90, 200)
     rsi_period: int = 14
+    rsi_macro_tfs: tuple[Timeframe, ...] = (Timeframe.H1, Timeframe.D1)  # マルチTF RSI (G2-⑤)
+    # 上位足RSIトリガーの反発/反落許容窓 (G2-⑤「到達、またはそこから反発/反落」)。
+    # 0 で「現在圏内のみ」、>0 で直近この本数以内に圏内到達があれば有効。
+    rsi_reversal_lookback: int = RSI_REVERSAL_LOOKBACK
     atr_period: int = 14
     grid_k_max: int = 12                         # 未来裁量の時間方向ホライズン (バー)
     price_step_atr: Decimal = Decimal("0.1")     # 価格グリッド刻み = 0.1 × ATR
@@ -141,9 +151,12 @@ class ProviderConfig:
     tp_sr_min_strength: Decimal = Decimal("1.5")  # 同・最小減衰加重強度
     # マクロ方向フィルター (設計書 §1 フラクタル: 上位足トレンドと一致時のみ発注)
     macro_filter: bool = True                    # 有効化 (False で従来のミクロ単独方向)
-    macro_tf: Timeframe = Timeframe.H4           # 方向を見定めるマクロ足
+    macro_tf: Timeframe = Timeframe.D1           # 方向を見定めるマクロ足 (手法ゲート1: D1/H1)
     # 上位足エリオット第2波判定 (entry-methodology.md: 本物の第2波を上位足で数える)
-    macro_wave2: bool = False                    # True で macro_tf のエリオットを wave-2 選択に使う
+    macro_wave2: bool = False                    # True で wave2_tf のエリオットを wave-2 選択に使う
+    wave2_tf: Timeframe = Timeframe.H4           # 第2波(押し目)カウント用TF。方向TFと独立
+    #   ↑ 方向はD1(大局)・押し目はやや細かい足(H4)で捉える。両者を同一TFにすると、
+    #     方向TFで押し目を待つ=そのTFの転換に見え、買いが消える論理矛盾が起きる。
     # 建値SL移動の構造トリガーTF。既定M5(高速)。True で上位足だが、半分利確が
     # 建値SL移動に依存する現結合では上位足はパイプラインを止めるため要注意。
     be_sl_macro_tf: bool = False                 # True で建値SLを上位足ダウ構造で動かす
@@ -176,13 +189,27 @@ class InfersSignalProvider:
         self._view: ElliottView | None = None
         self._cooldown = 0
 
-        # マクロ方向パイプライン (上位足リサンプル → 独立ダウFSM + エリオット計数)
+        # マクロ方向フィルター (方向TF=macro_tf をリサンプル → 独立ダウFSM)。
+        # 手法ゲート1: D1/H1 の大局トレンドで方向を確定し、押し目で揺れないようにする。
         self._macro_rs = MacroResampler(symbol, self.cfg.macro_tf)
         self._macro_atr = ATR(self.cfg.atr_period)
         self._macro_zz = ZigZagDetector(reversal_ticks=1)
         self._macro_dow = DowStateMachine()
-        self._macro_elliott = ElliottCounter()       # 本物の第2波を上位足で数える
-        self._macro_view: ElliottView | None = None
+        # 第2波カウント (押し目TF=wave2_tf を独立リサンプル → エリオット計数)。
+        # 方向TFと分離: 方向は大局(D1)、押し目はやや細かい足(H4)で本物の第2波を数える。
+        self._w2_rs = MacroResampler(symbol, self.cfg.wave2_tf)
+        self._w2_atr = ATR(self.cfg.atr_period)
+        self._w2_zz = ZigZagDetector(reversal_ticks=1)
+        self._w2_elliott = ElliottCounter()
+        self._w2_view: ElliottView | None = None
+        # マルチTF RSI (手法G2-⑤): 上位足(H1/D1)を独立リサンプル → WilderRSI。
+        # 各足について「極値圏に到達、またはそこから反発/反落した直後」を
+        # RsiExtremeRecency で判定し、コンフルエンスの加点に使う(重なるほど強い)。
+        self._rsi_mtf: list[tuple[MacroResampler, WilderRSI, RsiExtremeRecency]] = [
+            (MacroResampler(symbol, rtf), WilderRSI(self.cfg.rsi_period),
+             RsiExtremeRecency(self.cfg.rsi_reversal_lookback))
+            for rtf in self.cfg.rsi_macro_tfs
+        ]
 
     # -- パイプライン本体 ----------------------------------------------------------
 
@@ -198,10 +225,14 @@ class InfersSignalProvider:
             sma.update(candle.c_int)
         self._atr.update(candle.h_int, candle.l_int, candle.c_int)
         self._rsi.update(candle.c_int)
+        self._update_rsi_mtf(candle)             # 上位足RSI (H1/D1) を確定時に進める
 
         output = ProviderOutput()
-        # 保有玉の半分利確トリガー (§6.4) は毎足の現在RSIを使う
+        # 保有玉の半分利確トリガー (③-1) は毎足の現在RSI/90SMAを使う
         output.rsi_value = self._rsi.value
+        sma90 = self._smas.get(90)
+        if sma90 is not None and sma90.is_ready:
+            output.sma90_int = int(sma90.value.to_integral_value(rounding=ROUND_HALF_EVEN))
         macro_ev = self._update_macro(candle)   # 上位足ダウの構造イベント (確定時)
 
         # 2) スイング検出 → ダウFSM → エリオット計数 (ATRウォームアップ後)
@@ -252,11 +283,12 @@ class InfersSignalProvider:
     # -- プラン組成 -----------------------------------------------------------------
 
     def _update_macro(self, candle: Candle) -> StructureEvent | None:
-        """M5足を上位足リサンプラへ投入し、上位足確定時にダウFSM/エリオットを進める。
+        """方向TF(macro_tf)と押し目TF(wave2_tf)の上位足を独立に更新する。
 
-        上位足のダウ構造イベント (HH/HL/LH/LL) を返す。macro_wave2 時はこれを
+        方向TFのダウ構造イベント (HH/HL/LH/LL) を返す。be_sl_macro_tf 時はこれを
         建値SL移動のトリガーに使う (M5ノイズ狩りを避ける: entry-methodology.md ②)。
         """
+        self._update_wave2(candle)
         macro_bar = self._macro_rs.push(candle)
         if macro_bar is None:
             return None
@@ -270,9 +302,44 @@ class InfersSignalProvider:
         m_swing = self._macro_zz.update(macro_bar, reversal_ticks=m_theta)
         if m_swing is None:
             return None
-        ev = self._macro_dow.on_swing(m_swing)
-        self._macro_view = self._macro_elliott.on_swing(m_swing)
-        return ev
+        return self._macro_dow.on_swing(m_swing)
+
+    def _update_wave2(self, candle: Candle) -> None:
+        """押し目TF(wave2_tf)の上位足を更新し、本物の第2波ビュー(_w2_view)を進める。"""
+        bar = self._w2_rs.push(candle)
+        if bar is None:
+            return
+        self._w2_atr.update(bar.h_int, bar.l_int, bar.c_int)
+        if not self._w2_atr.is_ready:
+            return
+        w_atr = self._w2_atr.value
+        assert w_atr is not None
+        w_theta = max(1, int((self.cfg.k_atr_reversal * w_atr)
+                             .to_integral_value(rounding=ROUND_HALF_EVEN)))
+        swing = self._w2_zz.update(bar, reversal_ticks=w_theta)
+        if swing is None:
+            return
+        self._w2_view = self._w2_elliott.on_swing(swing)
+
+    def _update_rsi_mtf(self, candle: Candle) -> None:
+        """上位足(H1/D1)RSIを、各上位足の確定時に進める (マルチTF RSI: G2-⑤)。"""
+        for rs, rsi, recency in self._rsi_mtf:
+            bar = rs.push(candle)
+            if bar is not None:
+                rsi.update(bar.c_int)
+                v = rsi.value
+                if v is not None:
+                    recency.update(v)
+
+    def _htf_rsi_extreme(self, direction: int) -> int:
+        """上位足RSIが方向にトリガーした TF 数 (買い: ≤30 / 売り: ≥70)。
+
+        手法G2-⑤に従い「今まさに極値圏」だけでなく「直近 lookback 本以内に
+        極値圏へ到達 → 反発/反落した直後」も 1 TF としてカウントする。
+        """
+        return sum(
+            1 for _, _, recency in self._rsi_mtf if recency.active(direction)
+        )
 
     def _direction(self) -> int | None:
         """エントリー方向。ミクロ確定トレンドを、マクロ方向フィルターで絞る。
@@ -292,7 +359,7 @@ class InfersSignalProvider:
 
     def _wave_view(self) -> ElliottView | None:
         """wave-2 判定に使うエリオットビュー。macro_wave2 で上位足の本物の波を使う。"""
-        return self._macro_view if self.cfg.macro_wave2 else self._view
+        return self._w2_view if self.cfg.macro_wave2 else self._view
 
     def _select_wave2(self, direction: int, close_int: int) -> WaveCount | None:
         view = self._wave_view()
@@ -368,6 +435,7 @@ class InfersSignalProvider:
             fib_tol_ticks=max(1, int((self.cfg.fib_tol_atr * atr)
                                      .to_integral_value(rounding=ROUND_HALF_EVEN))),
             score_fib=self.cfg.score_fib,
+            htf_rsi_extreme=self._htf_rsi_extreme(direction),
         )
         if not cells:
             return []
@@ -405,7 +473,8 @@ class InfersSignalProvider:
         features = {
             "dow_state": self._dow.state.name,
             "macro_dow": self._macro_dow.state.name,
-            "wave2_tf": self.cfg.macro_tf.value if self.cfg.macro_wave2 else self.tf.value,
+            "macro_tf": self.cfg.macro_tf.value,
+            "wave2_tf": self.cfg.wave2_tf.value if self.cfg.macro_wave2 else self.tf.value,
             "current_wave": "2",
             "ambiguity": str(view.ambiguity),
             "cluster_score": str(best.score),
@@ -414,6 +483,10 @@ class InfersSignalProvider:
             "invalidation": str(inv),
             "w1_high": str(w1_high),
             "rsi": str(self._rsi.value),
+            "rsi_mtf": ",".join(
+                f"{rs.tf.value}:{rsi.value if rsi.value is not None else 'NA'}"
+                for rs, rsi, _ in self._rsi_mtf),
+            "rsi_mtf_extreme": str(self._htf_rsi_extreme(direction)),
             "rsi_band": f"{best.rsi_band[0]}..{best.rsi_band[1]}",
             "eta_bars": f"{best.eta_window[0]}-{best.eta_window[1]}",
             "atr": str(atr),

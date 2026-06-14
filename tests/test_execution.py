@@ -241,6 +241,35 @@ class TestLifecycle:
         assert fsm.journal[-1][0] == "HALF_TAKE_PROFIT"
         assert fsm.journal[-1][1]["trigger"] == "SR"
 
+    def test_half_tp_via_sma90_touch(self):
+        """RSI/SRが不発でも、確定足が90SMA(建値の利益側)を跨げば半分利確 (③-1)。"""
+        broker = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        fsm = make_filled_long(broker)
+        bar3 = mk_candle(3, 1035, 1015, 1031)
+        broker.process_bar(bar3)
+        fsm.on_wave1_break(bar3, 1020, add_volume_steps=2)
+        fsm.on_structure_event(structure_event(StructureEventType.HL, 1025))
+        assert fsm.state is PosState.SL_AT_BE                  # 平均建値1012
+        bar4 = mk_candle(4, 1075, 1040, 1070)
+        broker.process_bar(bar4)
+        # 90SMA=1050 は建値1012より上(利益側)。確定足[1040,1075]が跨ぐ → 半分利確
+        assert fsm.on_half_tp_signal(bar4, Decimal(50), (), 1050)
+        assert fsm.state is PosState.RUNNER
+        assert fsm.journal[-1][1]["trigger"] == "SMA90"
+
+    def test_half_tp_sma90_ignored_when_below_entry(self):
+        """90SMAが建値の損失側(下)にある接触では発火しない(利確にならない)。"""
+        broker = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        fsm = make_filled_long(broker)
+        bar3 = mk_candle(3, 1035, 1015, 1031)
+        broker.process_bar(bar3)
+        fsm.on_wave1_break(bar3, 1020, add_volume_steps=2)
+        fsm.on_structure_event(structure_event(StructureEventType.HL, 1025))  # 建値1012
+        bar4 = mk_candle(4, 1015, 1005, 1010)
+        broker.process_bar(bar4)
+        # 90SMA=1008 は建値1012より下(損失側)。跨いでも不発
+        assert not fsm.on_half_tp_signal(bar4, Decimal(50), (), 1008)
+
     def test_half_tp_ignores_support_and_below_entry_zones(self):
         """買いの半分利確は『建値より上の RESISTANCE 到達』のみ。SUPPORT や
         建値より下のゾーンでは発火しない。"""

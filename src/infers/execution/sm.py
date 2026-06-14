@@ -286,10 +286,12 @@ class PositionFSM:
     # -- §6.4 半分利確 (厳密に1回): RSI利確圏 or 重要SRゾーン到達 -------------------
 
     def on_half_tp_signal(self, candle: Candle, rsi_value: Decimal | None,
-                          sr_zones: tuple[SRZone, ...] = ()) -> bool:
-        """半分利確トリガー (設計書 §6.4)。確定足クローズで以下のいずれかなら半分利確:
+                          sr_zones: tuple[SRZone, ...] = (),
+                          sma90_int: int | None = None) -> bool:
+        """半分利確トリガー (entry-methodology.md ③-1)。確定足クローズで以下のいずれか:
 
           - RSIが利確圏に到達 (買い: rsi >= rsi_overbought / 売り: rsi <= rsi_oversold)
+          - 90SMAに接触 (確定足が90SMAを跨ぐ。SMAが建値の利益側にある時のみ)
           - 重要SRゾーンに到達 (買い: 建値より上の RESISTANCE / 売り: 下の SUPPORT)
 
         状態遷移 SL_AT_BE → RUNNER と不可分のため、RUNNER 以降では状態ガードにより
@@ -305,6 +307,12 @@ class PositionFSM:
         if rsi_value is not None:
             rsi_hit = (rsi_value >= self._cfg.rsi_overbought if self.direction > 0
                        else rsi_value <= self._cfg.rsi_oversold)
+
+        # 90SMA接触 (グランビル利確点): 確定足が90SMAを跨ぎ、かつ SMA が建値の利益側
+        # にある (= 利確になる位置) ときのみ。深い押し目買いが90SMAまで戻った瞬間。
+        sma_hit = False
+        if sma90_int is not None and candle.l_int <= sma90_int <= candle.h_int:
+            sma_hit = self._profit_side(sma90_int, self._entry_price_int) > 0
 
         sr_hit = False
         want_role = "RESISTANCE" if self.direction > 0 else "SUPPORT"
@@ -322,7 +330,7 @@ class PositionFSM:
                 sr_hit = True
                 break
 
-        if not (rsi_hit or sr_hit):
+        if not (rsi_hit or sma_hit or sr_hit):
             return False
 
         half = self._volume_steps // 2
@@ -333,8 +341,9 @@ class PositionFSM:
         )
         self._volume_steps -= half
         self._state = PosState.RUNNER
+        trigger = "RSI" if rsi_hit else ("SMA90" if sma_hit else "SR")
         self._log("HALF_TAKE_PROFIT", closed=half, runner=self._volume_steps,
-                  trigger="RSI" if rsi_hit else "SR",
+                  trigger=trigger,
                   rsi=str(rsi_value) if rsi_value is not None else None)
         return True
 
