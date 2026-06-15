@@ -77,6 +77,21 @@ def sma_touch_curve(closes: Sequence[int], period: int, horizon: int) -> dict[in
     return {k: sma_touch_price(closes, period, k) for k in range(1, k_max + 1)}
 
 
+def sma_slope_sign(closes: Sequence[int], period: int, lookback: int) -> int:
+    """確定終値から算出した SMA(period) の実現傾き符号 (+1上昇/0横這い/−1下降)。
+
+    グランビル判定(買②③は「傾きが逆行していない」)の傾き整合チェックに使う。
+    末尾 period 本の和と、lookback 本だけ過去の同期間和を比較する(同じ本数なので
+    和の大小がそのまま傾きの符号)。履歴が足りなければ 0(横這い扱い=逆行しない)。
+    """
+    n = len(closes)
+    if lookback < 1 or n < period + lookback:
+        return 0
+    now = sum(closes[n - period:])
+    prev = sum(closes[n - period - lookback:n - lookback])
+    return (now > prev) - (now < prev)
+
+
 # ---------------------------------------------------------------------------
 # §5.3 RSI逆算 — 4種の代表パス族によるバンド評価
 # ---------------------------------------------------------------------------
@@ -145,8 +160,18 @@ class RsiBand:
 
     @property
     def oversold_possible(self) -> bool:
-        """少なくとも一部のパスで RSI<=30 (パス次第)。"""
+        """少なくとも一部のパスで RSI<=30 (パス次第)。相反veto判定に使う(安全側)。"""
         return self.lo <= RSI_OVERSOLD
+
+    @property
+    def oversold_likely(self) -> bool:
+        """中心パス(linear)で RSI<=30 に到達。M5加点判定はこちらを使う(厳格化)。
+
+        `oversold_possible` (全パス中の最良ケースが到達=hi/loの片端) は、十分離れた
+        target では「到達可能性あり」がほぼ常に成立してしまい判別力を失う。中心的な
+        パス1本での到達を要求することで、M5 RSI family が常時成立する問題を防ぐ。
+        """
+        return self.by_path["linear"] <= RSI_OVERSOLD
 
     @property
     def overbought_certain(self) -> bool:
@@ -154,7 +179,13 @@ class RsiBand:
 
     @property
     def overbought_possible(self) -> bool:
+        """少なくとも一部のパスで RSI>=70 (パス次第)。相反veto判定に使う(安全側)。"""
         return self.hi >= RSI_OVERBOUGHT
+
+    @property
+    def overbought_likely(self) -> bool:
+        """中心パス(linear)で RSI>=70 に到達。M5加点判定はこちらを使う(厳格化)。"""
+        return self.by_path["linear"] >= RSI_OVERBOUGHT
 
 
 def rsi_band(state: RsiState, target_int: int, k: int,
@@ -183,13 +214,17 @@ def rsi_band(state: RsiState, target_int: int, k: int,
 
 @dataclass(frozen=True)
 class FutureCell:
-    """グリッド上の1セル。families >= 2 のセルのみマップに残る。"""
+    """グリッド上の1セル。families >= 2 かつ非veto のセルのみマップに残る。"""
 
     k: int
     price_int: int
     families: tuple[str, ...]      # 例 ("RSI", "SR") — family単位 (重複なし)
-    score: Decimal                 # RSI確実=1 / パス次第=0.5、他family各1
+    score: Decimal                 # 1 family = 1 点 (二値加点。手法G2 ①)
     rsi: RsiBand
+    rsi_strength: str = "NONE"     # RSI根拠の強度 HIGH/MEDIUM/LOW/NONE (手法G2-⑤③)
+    sr_strength: Decimal = Decimal(0)  # 接触サポートゾーンの減衰加重強度 (手法G2-⑥④)
+    sma_strength: str = "NONE"     # SMAグランビル根拠の強度 HIGH/MEDIUM/NONE (手法G2-⑦④)
+    dow_strength: str = "NONE"     # ダウ順行根拠の強度 HIGH/MEDIUM/NONE (手法G2-⑧③)
 
 
 def build_future_map(
@@ -206,24 +241,49 @@ def build_future_map(
     fib_tol_ticks: int = 1,
     min_families: int = 2,
     score_fib: bool = True,                # False: FIBをコンフルエンス・スコアから除外
-    htf_rsi_extreme: int = 0,              # 上位足(H1/D1)RSIが方向にトリガーしたTF数 (到達/反発: G2-⑤)
+    htf_rsi_aligned: int = 0,              # 上位足(H1/D1)RSIが順方向にトリガーしたTF数 (G2-⑤③)
+    htf_rsi_conflict: int = 0,             # 上位足(H1/D1)RSIが逆方向にトリガーしたTF数 (相反: G2-⑤③)
+    sma_far_ticks: int = 10**9,            # 買④/売④の「極端乖離」閾値 (θ_far×ATR)。既定は実質OFF
+    sma_slope_lookback: int = 5,           # SMA傾き符号の算出ルックバック (買②③の整合チェック)
+    dow_aligned: bool = False,             # ミクロダウが順方向/反転初動 → "DOW" family +1 (G2-⑧③)
+    dow_conflict: bool = False,            # ミクロダウが明確な逆行 → クラスタ破壊 (相反: G2-⑧③)
+    dow_strength: str = "NONE",            # ダウ順行根拠の強度 HIGH(順行)/MEDIUM(反転初動)/NONE
 ) -> list[FutureCell]:
-    """(k, P) グリッドを評価し、根拠 >=2 family のセルだけを返す (純粋関数)。
+    """(k, P) グリッドを評価し、根拠 >=2 family の非veto セルだけを返す (純粋関数)。
 
-    family は確定済みコンフルエンス (confluence.py) と同じ思想で数える:
-    複数SMA期間のヒットも "SMA" 1 family。マニュアル3.4 の絶対条件
-    (根拠2つ以上) を未来時点にもそのまま適用する。
+    スコアは「1 family = 1 点」(手法G2 ①。複雑な重み付けはしない)。family は確定済み
+    コンフルエンス (confluence.py) と同じ思想で数える: 複数SMA期間のヒットも "SMA" 1
+    family。マニュアル3.4 の絶対条件 (根拠2つ以上) を未来時点にもそのまま適用する。
 
-    RSI はマルチTF (手法G2-⑤): M5 は (k,P) 到達時の前方バンド、上位足(H1/D1)は
-    「極値圏に到達、またはそこから反発/反落した直後」のTF数を `htf_rsi_extreme`
-    で受け取る (判定は呼び出し側の RsiExtremeRecency)。M5・上位足のいずれかが
-    トリガーすれば "RSI" family 成立、重なるほど score を加点する
-    (「複数TFで重なるほど強い」)。
+    **クラスタ破壊 (veto / NO-TRADE)**: 方向に相反する根拠が現れたセルは、たとえ他の
+    family が2つ以上あっても破棄する (手法G2-⑤③/⑥③ の安全装置)。
+      - RSI 相反: 上位足が逆方向の極値 (買い狙いで H1/D1 が ≥70 等)、または M5 前方
+        バンドが逆方向の極値に達しうる場合。
+      - SR 相反: 到達価格が逆行を阻む側のゾーン (買い狙いで上値のレジスタンス) に接触。
+
+    RSI はマルチTF (手法G2-⑤): M5 は (k,P) 到達時の前方バンド (順方向の加点は
+    oversold/overbought_likely = 中心パス(linear)基準。相反vetoは possible = 安全側の
+    端点基準のまま) で、上位足(H1/D1)は突入イベント窓内のTF数を `htf_rsi_aligned`
+    (順方向)/`htf_rsi_conflict`(逆方向) で受け取る (判定は呼び出し側の RsiExtremeRecency)。
+    順方向のいずれかが立てば "RSI" family は **1点** 成立、強度は HIGH(上位足+M5)/
+    MEDIUM(上位足のみ)/LOW(M5のみ) として記録する (点数は重なっても1点: ①)。
+
+    SMA はグランビル (手法G2-⑦): M5前方投影SMAで、買②③ = SMAタッチ + 傾き順行
+    (傾きが逆行していない) → 強度 HIGH、買④ = 極端な下方乖離 (≥ `sma_far_ticks`) →
+    強度 MEDIUM。複数期間(90/200)が同時にヒットすれば密集として強度 HIGH。点数は
+    重なっても1点 (①)。傾き逆行のタッチは根拠にしない。上位足の下向きSMAが上値を
+    覆う「壁」のクラスタ破壊 (④マトリクスの相反行) は上位足SMA整備フェーズで対応。
+
+    ダウ順行 (手法G2-⑧): ミクロのダウ状態は (k,P) に依存しない定数なので、呼び出し側
+    (provider) が方向に対して分類 (classify_dow) し、`dow_aligned`(順行/反転初動→"DOW"
+    family +1)・`dow_conflict`(明確な逆行→全セル破壊)・`dow_strength`(HIGH/MEDIUM) で渡す。
     """
     if direction not in (+1, -1):
         raise ValueError("direction must be +1 or -1")
     if min_families < 2:
         raise ValueError("min_families must be >= 2 (CLAUDE.md rule 5)")
+    if dow_conflict:
+        return []                          # ミクロが明確な逆行 → NO-TRADE (落ちるナイフ)
 
     cells: list[FutureCell] = []
     for k in k_range:
@@ -231,40 +291,78 @@ def build_future_map(
             families: list[str] = []
             score = Decimal(0)
 
-            # --- RSI極値 (マルチTF: M5前方バンド + 上位足H1/D1の現在極値) ---
+            # --- ダウ順行 (手法G2-⑧③): 順行/反転初動なら1点 (相反は冒頭で全破棄済み) ---
+            if dow_aligned:
+                families.append("DOW")
+                score += 1
+
+            # --- RSIマルチTF (手法G2-⑤②③): 相反→veto、順方向→1点+強度 ---
             band = rsi_band(rsi_state, p, k)
             if direction > 0:
-                certain, possible = band.oversold_certain, band.oversold_possible
+                m5_aligned, m5_conflict = band.oversold_likely, band.overbought_possible
             else:
-                certain, possible = band.overbought_certain, band.overbought_possible
-            rsi_hit = False
-            if certain:
-                rsi_hit = True
-                score += 1
-            elif possible:
-                rsi_hit = True
-                score += Decimal("0.5")
-            # 上位足RSIの極値は (k,P) に依存しない定数。重なる足数だけ 0.5 ずつ加点
-            if htf_rsi_extreme > 0:
-                rsi_hit = True
-                score += Decimal("0.5") * htf_rsi_extreme
-            if rsi_hit:
+                m5_aligned, m5_conflict = band.overbought_likely, band.oversold_possible
+            # 相反状態 (方向の不一致) は直ちにコンフルエンス不成立 = クラスタ破壊
+            # (m5_conflict は安全側の possible 判定を維持: 加点条件のみ厳格化する)
+            if htf_rsi_conflict > 0 or m5_conflict:
+                continue
+            rsi_strength = "NONE"
+            if htf_rsi_aligned > 0 or m5_aligned:
                 families.append("RSI")
+                score += 1
+                rsi_strength = (
+                    "HIGH" if (htf_rsi_aligned > 0 and m5_aligned)
+                    else "MEDIUM" if htf_rsi_aligned > 0
+                    else "LOW"
+                )
 
-            # --- SMA接触 (期間が複数ヒットしても 1 family) ---
-            sma_hit = False
+            # --- SMA / グランビル (手法G2-⑦): M5前方投影SMAで判定。期間が複数
+            #     ヒットしても "SMA" 1 family (重なりは強度に反映)。 ---
+            #       買②③: SMAタッチ + 傾き順行 (傾きが逆行していない) → 強度 HIGH
+            #       買④  : 価格がSMAから極端に下方乖離 (≥ far) → 強度 MEDIUM (要他根拠)
+            #     傾き逆行のタッチ(下向きSMAへの接触=抵抗)は根拠にしない。上位足の
+            #     下向きSMAが上値を覆う「壁」のクラスタ破壊は上位足SMA整備フェーズで対応。
+            sma_strength = "NONE"
+            sma_touch = False
+            sma_dev = False
+            sma_hits = 0
             for period in sma_periods:
                 if k >= period or len(closes) < period:
                     continue
                 proj = sma_forward_linear(closes, period, k, p)
-                if abs(Decimal(p) - proj) <= sma_tol_ticks:
-                    sma_hit = True
-            if sma_hit:
+                d = proj - Decimal(p)              # >0: SMAが価格より上 (買い側の下方乖離)
+                slope = sma_slope_sign(closes, period, sma_slope_lookback)
+                aligned = slope >= 0 if direction > 0 else slope <= 0
+                if abs(d) <= sma_tol_ticks:
+                    if aligned:                    # 買②③ (傾き順行のSMAサポートタッチ)
+                        sma_touch = True
+                        sma_hits += 1
+                elif (d >= sma_far_ticks if direction > 0 else -d >= sma_far_ticks):
+                    sma_dev = True                 # 買④/売④ (極端乖離からの回帰)
+                    sma_hits += 1
+            if sma_touch or sma_dev:
                 families.append("SMA")
                 score += 1
+                # 買②③ タッチ or 複数SMA密集 → 高、買④ 単独 → 中 (手法G2-⑦④)
+                sma_strength = "HIGH" if (sma_touch or sma_hits >= 2) else "MEDIUM"
 
-            # --- レジサポゾーン ---
-            if any(z.contains(p) for z in sr_zones):
+            # --- 水平レジサポ (手法G2-⑥②③): ゾーンの役割 (現在価格基準で算出済み、
+            #     ブレイク役割転換は build_zones/SRZoneTracker の責務) で判定する。
+            #     買いは順行を支える SUPPORT 接触で +1、逆行を阻む RESISTANCE 接触は
+            #     クラスタ破壊。売りは対称。複数ラインが接触しても family は1つ。 ---
+            aligned_role = "SUPPORT" if direction > 0 else "RESISTANCE"
+            sr_strength = Decimal(0)
+            sr_opposed = False
+            for z in sr_zones:
+                if not z.contains(p):
+                    continue
+                if z.role == aligned_role:
+                    sr_strength = max(sr_strength, z.strength)
+                else:
+                    sr_opposed = True
+            if sr_opposed:
+                continue                       # 逆行を阻む帯に接触 → クラスタ破壊
+            if sr_strength > 0:
                 families.append("SR")
                 score += 1
 
@@ -278,6 +376,8 @@ def build_future_map(
                 cells.append(FutureCell(
                     k=k, price_int=p,
                     families=tuple(families), score=score.quantize(Q), rsi=band,
+                    rsi_strength=rsi_strength, sr_strength=sr_strength.quantize(Q),
+                    sma_strength=sma_strength, dow_strength=dow_strength,
                 ))
     return cells
 
@@ -303,6 +403,10 @@ class FutureConfluence:
     expiry: datetime                       # now + k_max × バー長
     families: tuple[str, ...]
     rsi_band: tuple[Decimal, Decimal]      # (lo, hi) — L2へ渡す期待値特徴量
+    rsi_strength: str = "NONE"             # RSI根拠の強度 (採用セル基準。手法G2-⑤③)
+    sr_strength: Decimal = Decimal(0)      # 接触サポートゾーンの強度 (手法G2-⑥④)
+    sma_strength: str = "NONE"             # SMAグランビル根拠の強度 (手法G2-⑦④)
+    dow_strength: str = "NONE"             # ダウ順行根拠の強度 (手法G2-⑧③)
     invalidation_price: int | None = None
 
 
@@ -355,6 +459,10 @@ def propose_limit_orders(
             expiry=now + k_max * bar_duration,
             families=best.families,
             rsi_band=(lo, hi),
+            rsi_strength=best.rsi_strength,
+            sr_strength=best.sr_strength,
+            sma_strength=best.sma_strength,
+            dow_strength=best.dow_strength,
             invalidation_price=invalidation_price,
         ))
     candidates.sort(key=lambda c: c.score, reverse=True)

@@ -535,6 +535,34 @@ class TestInfersSignalProvider:
         # 全域許可の方が、より浅い(高い)指値まで取り得る (狭めていない)
         assert wmax >= dmax
 
+    def test_max_risk_ticks_falls_back_to_lower_risk_candidate(self):
+        """1トレード最大リスク (entry-methodology.md G2-⑥訂正2026-06-15): SL距離(ticks)×
+        volume_steps が max_risk_ticks を超える最良候補(limit=997, risk=130)は、
+        cap を下回る次点候補(limit=946, risk=28)へフォールバックする。
+        """
+        default_plans = [p for o in self.collect()[1] for p in o.plans]
+        assert len(default_plans) == 1
+        assert default_plans[0].limit_price_int == 997
+        assert abs(default_plans[0].limit_price_int - default_plans[0].sl_int) * \
+            default_plans[0].volume_steps == 130
+
+        capped_cfg = ProviderConfig(rsi_period=5, sma_periods=(30,), cooldown_bars=30,
+                                     macro_filter=False, max_risk_ticks=129)
+        provider = InfersSignalProvider(symbol="XAUUSD", tf=Timeframe.M5, config=capped_cfg)
+        capped_plans = [p for c in provider_series() for p in provider.on_candle(c).plans]
+        assert len(capped_plans) == 1
+        p = capped_plans[0]
+        assert p.limit_price_int == 946
+        assert abs(p.limit_price_int - p.sl_int) * p.volume_steps == 28
+
+    def test_max_risk_ticks_skips_when_all_candidates_exceed(self):
+        """全候補が上限を超える場合は当該足を見送る (NO-TRADE)。"""
+        cfg = ProviderConfig(rsi_period=5, sma_periods=(30,), cooldown_bars=30,
+                             macro_filter=False, max_risk_ticks=1)
+        provider = InfersSignalProvider(symbol="XAUUSD", tf=Timeframe.M5, config=cfg)
+        plans = [p for c in provider_series() for p in provider.on_candle(c).plans]
+        assert plans == []
+
     def test_macro_filter_blocks_when_macro_unconfirmed(self):
         """マクロフィルター有効時、マクロ足が方向未確定なら発注ゼロ (フルパイプライン配線確認)。
 
@@ -570,7 +598,9 @@ class TestInfersSignalProvider:
         assert p.expiry > T0                              # 失効時刻つき (時間依存)
         assert p.request.features["dow_state"] == "UP"
         fam = p.request.features["families"]
-        assert "SR" in fam
+        # コンフルエンス絶対条件: 独立 family が2つ以上 (手法G2 / CLAUDE.md 第5条)。
+        # RSI二値化(G2-⑤①)後の最良セルは RSI+SMA+FIB 等になり得る(SR必須ではない)。
+        assert len({s for s in fam.split(",") if s}) >= 2
         # P6: 既定の require_core_family=True 下では中核根拠(SMA/RSI)を必ず含む
         assert "RSI" in fam or "SMA" in fam
         assert p.volume_steps == 2 and p.add_volume_steps == 2

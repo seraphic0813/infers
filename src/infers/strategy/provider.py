@@ -26,16 +26,11 @@ from datetime import datetime, timezone
 from decimal import ROUND_HALF_EVEN, Decimal
 
 from infers.ai.gateway import JudgementKind, JudgementRequest
-from infers.analysis.dow import DowStateMachine, StructureEvent, TrendState
+from infers.analysis.dow import DowStateMachine, StructureEvent, TrendState, classify_dow
 from infers.analysis.elliot import ElliottCounter, ElliottView, WaveCount
 from infers.analysis.future_discretion import build_future_map, propose_limit_orders
 from infers.analysis.indicators import ATR, SMA, WilderRSI
-from infers.analysis.micro import (
-    RSI_OVERBOUGHT,
-    RSI_OVERSOLD,
-    RSI_REVERSAL_LOOKBACK,
-    RsiExtremeRecency,
-)
+from infers.analysis.micro import RSI_EVENT_WINDOW, RsiExtremeRecency
 from infers.analysis.support_resistance import build_zones
 from infers.analysis.zigzag import SwingPoint, ZigZagDetector
 from infers.core.loop import ProviderOutput, TradePlan
@@ -132,16 +127,25 @@ class ProviderConfig:
     sma_periods: tuple[int, ...] = (90, 200)
     rsi_period: int = 14
     rsi_macro_tfs: tuple[Timeframe, ...] = (Timeframe.H1, Timeframe.D1)  # マルチTF RSI (G2-⑤)
-    # 上位足RSIトリガーの反発/反落許容窓 (G2-⑤「到達、またはそこから反発/反落」)。
-    # 0 で「現在圏内のみ」、>0 で直近この本数以内に圏内到達があれば有効。
-    rsi_reversal_lookback: int = RSI_REVERSAL_LOOKBACK
+    # 上位足RSI極値の突入イベント有効窓 (G2-⑤④)。突入足を含め、その後この本数まで
+    # 根拠を有効とする (反発/反落しても窓内は有効・ベタ付きは単一イベント化)。0 で突入足のみ。
+    rsi_event_window: int = RSI_EVENT_WINDOW
     atr_period: int = 14
     grid_k_max: int = 12                         # 未来裁量の時間方向ホライズン (バー)
     price_step_atr: Decimal = Decimal("0.1")     # 価格グリッド刻み = 0.1 × ATR
-    sma_tol_atr: Decimal = Decimal("0.3")        # SMA接触許容幅
+    sma_tol_atr: Decimal = Decimal("0.3")        # SMA接触許容幅 (買②③タッチ)
+    sma_far_atr: Decimal = Decimal("3.0")        # 買④/売④の極端乖離閾値 (θ_far×ATR)
+    sma_slope_lookback: int = 5                  # SMA傾き符号の算出ルックバック (買②③整合)
     fib_tol_atr: Decimal = Decimal("0.3")        # FIBリトレース水準の許容幅
     fib_ratios: tuple[Decimal, ...] = FIB_RETRACE_RATIOS
     sl_buffer_atr: Decimal = Decimal("0.5")      # SL = 無効化価格 − buffer
+    # 1トレードの最大リスク (= |limit-SL|(ticks) × probe_volume_steps)。第1波が
+    # 極端に大きい/40%深さの押し目が無効化価格から遠い局面では SL距離が外れ値化し
+    # (例: 通常 $3-4 に対し $80-150)、固定ロットのまま壊滅的な損失になる
+    # (entry-methodology.md G2-⑥訂正)。これを超える候補は候補リストの次点へフォール
+    # バックし、全候補が超える場合は当該足を見送る (NO-TRADE)。
+    # 既定 10000 = $100 (probe_volume_steps=2 のとき SL距離 $50 まで)。
+    max_risk_ticks: int = 10000
     probe_volume_steps: int = 2
     add_volume_steps: int = 2
     cooldown_bars: int = 12
@@ -207,7 +211,7 @@ class InfersSignalProvider:
         # RsiExtremeRecency で判定し、コンフルエンスの加点に使う(重なるほど強い)。
         self._rsi_mtf: list[tuple[MacroResampler, WilderRSI, RsiExtremeRecency]] = [
             (MacroResampler(symbol, rtf), WilderRSI(self.cfg.rsi_period),
-             RsiExtremeRecency(self.cfg.rsi_reversal_lookback))
+             RsiExtremeRecency(self.cfg.rsi_event_window))
             for rtf in self.cfg.rsi_macro_tfs
         ]
 
@@ -331,31 +335,38 @@ class InfersSignalProvider:
                 if v is not None:
                     recency.update(v)
 
-    def _htf_rsi_extreme(self, direction: int) -> int:
-        """上位足RSIが方向にトリガーした TF 数 (買い: ≤30 / 売り: ≥70)。
+    def _htf_rsi_aligned(self, direction: int) -> int:
+        """上位足RSIが順方向にトリガーした TF 数 (買い: ≤30 / 売り: ≥70)。
 
-        手法G2-⑤に従い「今まさに極値圏」だけでなく「直近 lookback 本以内に
-        極値圏へ到達 → 反発/反落した直後」も 1 TF としてカウントする。
+        手法G2-⑤④の突入イベント窓で判定 (圏内到達 + その後の反発/反落も窓内は有効)。
         """
-        return sum(
-            1 for _, _, recency in self._rsi_mtf if recency.active(direction)
-        )
+        return sum(1 for _, _, rec in self._rsi_mtf if rec.active(direction))
+
+    def _htf_rsi_conflict(self, direction: int) -> int:
+        """上位足RSIが逆方向の極値にある TF 数 (相反 → クラスタ破壊: G2-⑤③)。"""
+        return sum(1 for _, _, rec in self._rsi_mtf if rec.active(-direction))
 
     def _direction(self) -> int | None:
-        """エントリー方向。ミクロ確定トレンドを、マクロ方向フィルターで絞る。
+        """エントリー方向 (手法ゲート1)。
 
-        ミクロ (M5) のダウが UP→買い/DOWN→売り。さらに macro_filter 有効時は
-        マクロ足のダウ方向と一致するものだけ通す (設計書 §1 フラクタル)。
+        macro_filter 有効時は **マクロ足のダウ** が方向を確定する (UP→買い/DOWN→売り。
+        UNDEFINED/SUSPECT は見送り)。ミクロ (M5) のダウはゲート2の「Dow Family」として
+        別途評価し、明確な逆行のみクラスタ破壊する (entry-methodology.md G2-⑧)。
+        macro_filter 無効時 (マクロシールド無しの検証モード) は従来どおりミクロ方向を使う。
         """
-        if self._dow.state is TrendState.UP:
-            micro: int | None = +1
-        elif self._dow.state is TrendState.DOWN:
-            micro = -1
-        else:
-            return None
-        if self.cfg.macro_filter:
-            return macro_gate(micro, self._macro_dow.state)
-        return micro
+        dow = self._macro_dow if self.cfg.macro_filter else self._dow
+        if dow.state is TrendState.UP:
+            return +1
+        if dow.state is TrendState.DOWN:
+            return -1
+        return None
+
+    def _dow_family(self, direction: int) -> tuple[bool, bool, str]:
+        """ミクロダウを方向に対し分類し (aligned, conflict, strength) を返す (G2-⑧③)。"""
+        cls = classify_dow(self._dow.state, direction)
+        aligned = cls in ("ALIGNED", "REVERSAL")
+        strength = "HIGH" if cls == "ALIGNED" else "MEDIUM" if cls == "REVERSAL" else "NONE"
+        return aligned, cls == "CONFLICT", strength
 
     def _wave_view(self) -> ElliottView | None:
         """wave-2 判定に使うエリオットビュー。macro_wave2 で上位足の本物の波を使う。"""
@@ -374,6 +385,10 @@ class InfersSignalProvider:
     def _build_plans(self, candle: Candle) -> list[TradePlan]:
         direction = self._direction()
         if direction is None:
+            return []
+        # ゲート2 Dow Family (G2-⑧): ミクロダウが明確な逆行ならここで全面見送り。
+        dow_aligned, dow_conflict, dow_strength = self._dow_family(direction)
+        if dow_conflict:
             return []
         wc = self._select_wave2(direction, candle.c_int)
         if wc is None:
@@ -435,7 +450,14 @@ class InfersSignalProvider:
             fib_tol_ticks=max(1, int((self.cfg.fib_tol_atr * atr)
                                      .to_integral_value(rounding=ROUND_HALF_EVEN))),
             score_fib=self.cfg.score_fib,
-            htf_rsi_extreme=self._htf_rsi_extreme(direction),
+            htf_rsi_aligned=self._htf_rsi_aligned(direction),
+            htf_rsi_conflict=self._htf_rsi_conflict(direction),
+            sma_far_ticks=max(1, int((self.cfg.sma_far_atr * atr)
+                                     .to_integral_value(rounding=ROUND_HALF_EVEN))),
+            sma_slope_lookback=self.cfg.sma_slope_lookback,
+            dow_aligned=dow_aligned,
+            dow_conflict=dow_conflict,
+            dow_strength=dow_strength,
         )
         if not cells:
             return []
@@ -450,11 +472,22 @@ class InfersSignalProvider:
                           if "SMA" in c.families or "RSI" in c.families]
             if not candidates:
                 return []
-        best = candidates[0]
 
         sl_buffer = max(1, int((self.cfg.sl_buffer_atr * atr)
                                .to_integral_value(rounding=ROUND_HALF_EVEN)))
         sl_int = inv - direction * sl_buffer
+
+        # 1トレード最大リスク (entry-methodology.md G2-⑥訂正): SL距離(ticks)×ロットが
+        # max_risk_ticks を超える候補は採用しない。先頭(規定の最良候補)から順に
+        # 上限内のものを探し、全候補が超える場合は当該足を見送る (NO-TRADE)。
+        best = next(
+            (c for c in candidates
+             if abs(c.limit_price_int - sl_int) * self.cfg.probe_volume_steps
+             <= self.cfg.max_risk_ticks),
+            None)
+        if best is None:
+            return []
+
         len1 = wc.wave_len(1)
         fib_target = best.limit_price_int + direction * int(
             (Decimal(len1) * FIB_161_8).to_integral_value(rounding=ROUND_HALF_EVEN))
@@ -486,7 +519,12 @@ class InfersSignalProvider:
             "rsi_mtf": ",".join(
                 f"{rs.tf.value}:{rsi.value if rsi.value is not None else 'NA'}"
                 for rs, rsi, _ in self._rsi_mtf),
-            "rsi_mtf_extreme": str(self._htf_rsi_extreme(direction)),
+            "rsi_mtf_aligned": str(self._htf_rsi_aligned(direction)),
+            "rsi_mtf_conflict": str(self._htf_rsi_conflict(direction)),
+            "rsi_strength": best.rsi_strength,
+            "sma_strength": best.sma_strength,
+            "dow_strength": best.dow_strength,
+            "sr_strength": str(best.sr_strength),
             "rsi_band": f"{best.rsi_band[0]}..{best.rsi_band[1]}",
             "eta_bars": f"{best.eta_window[0]}-{best.eta_window[1]}",
             "atr": str(atr),

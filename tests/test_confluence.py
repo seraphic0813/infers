@@ -129,43 +129,63 @@ class TestRsiExtreme:
 
 
 class TestRsiExtremeRecency:
-    """G2-⑤「≤30/≥70 到達、またはそこから反発/反落」の判定 (上位足RSI)。"""
+    """G2-⑤ ②③④「突入イベント化 + 有効時間窓」の判定 (上位足RSI)。"""
 
-    def test_active_while_in_zone(self):
-        rec = RsiExtremeRecency(lookback=3)
-        rec.update(Decimal(28))                     # 売られすぎ到達
+    def test_active_on_crossin(self):
+        rec = RsiExtremeRecency(window=3)
+        rec.update(Decimal(28))                     # 売られすぎ突入
         assert rec.active(+1) is True               # 買い方向で有効
         assert rec.active(-1) is False              # 売り方向では無効
 
-    def test_active_after_bounce_within_lookback(self):
-        """圏外へ反発した直後も lookback 本以内なら有効 (反発/反落トリガー)。"""
-        rec = RsiExtremeRecency(lookback=3)
-        rec.update(Decimal(28))                     # 到達 (since=0)
-        rec.update(Decimal(33))                     # 反発1本目 (since=1)
-        rec.update(Decimal(36))                     # 反発2本目 (since=2)
-        rec.update(Decimal(40))                     # 反発3本目 (since=3)
-        assert rec.active(+1) is True               # lookback=3 以内
-        rec.update(Decimal(45))                     # 4本目 (since=4)
+    def test_window_holds_after_bounce(self):
+        """突入後に圏外へ反発/反落しても、窓内 (突入足+window本) は有効。"""
+        rec = RsiExtremeRecency(window=3)
+        rec.update(Decimal(28))                     # 突入 (rem=4)
+        rec.update(Decimal(33))                     # 反発1本目 (rem=3)
+        rec.update(Decimal(36))                     # 2本目 (rem=2)
+        rec.update(Decimal(40))                     # 3本目 (rem=1)
+        assert rec.active(+1) is True               # 突入足含め4本目まで有効
+        rec.update(Decimal(45))                     # 4本目 (rem=0)
         assert rec.active(+1) is False              # 窓を超えて失効
 
+    def test_betatuki_is_single_event(self):
+        """ベタ付き (圏内に長期滞在) でも単一イベント: 窓を過ぎれば圏内でも失効。"""
+        rec = RsiExtremeRecency(window=2)
+        rec.update(Decimal(28))                     # 突入 (rem=3)
+        rec.update(Decimal(25))                     # 滞在・再点火しない (rem=2)
+        rec.update(Decimal(27))                     # 滞在 (rem=1)
+        assert rec.active(+1) is True
+        rec.update(Decimal(26))                     # 滞在 (rem=0)
+        assert rec.active(+1) is False              # 圏内でも窓切れで失効 (スパム防止)
+
+    def test_reentry_restarts_window(self):
+        """いったん圏外へ出て再突入すると窓が再点火する。"""
+        rec = RsiExtremeRecency(window=1)
+        rec.update(Decimal(28))                     # 突入 (rem=2)
+        rec.update(Decimal(40))                     # 圏外 (rem=1)
+        rec.update(Decimal(45))                     # 圏外 (rem=0)
+        assert rec.active(+1) is False
+        rec.update(Decimal(29))                     # 再突入 (rem=2)
+        assert rec.active(+1) is True
+
     def test_never_reached_is_inactive(self):
-        rec = RsiExtremeRecency(lookback=3)
+        rec = RsiExtremeRecency(window=3)
         rec.update(Decimal(50))
         rec.update(Decimal(45))
         assert rec.active(+1) is False
         assert rec.active(-1) is False
 
-    def test_lookback_zero_is_current_only(self):
-        """lookback=0 は従来の「現在圏内のみ」と等価。"""
-        rec = RsiExtremeRecency(lookback=0)
+    def test_window_zero_is_crossin_only(self):
+        """window=0 は突入した足のみ有効。"""
+        rec = RsiExtremeRecency(window=0)
         rec.update(Decimal(28))
         assert rec.active(+1) is True
-        rec.update(Decimal(33))                     # 圏外へ抜けたら即失効
+        rec.update(Decimal(25))                     # 滞在しても翌足で失効
         assert rec.active(+1) is False
 
     def test_overbought_direction(self):
-        rec = RsiExtremeRecency(lookback=2)
-        rec.update(Decimal(72))                     # 買われすぎ到達
+        rec = RsiExtremeRecency(window=2)
+        rec.update(Decimal(72))                     # 買われすぎ突入
         assert rec.active(-1) is True               # 売り方向で有効
         assert rec.active(+1) is False
 

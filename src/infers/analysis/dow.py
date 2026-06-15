@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Literal
 
 from infers.analysis.zigzag import SwingPoint
 
@@ -31,6 +32,32 @@ class TrendState(Enum):
     DOWN = auto()
     DOWN_SUSPECT = auto()
     UNDEFINED = auto()       # 初期状態 (HH/HL or LH/LL のペア成立まで)
+
+
+DowFamily = Literal["ALIGNED", "REVERSAL", "NEUTRAL", "CONFLICT"]
+
+
+def classify_dow(state: TrendState, direction: int) -> DowFamily:
+    """ミクロのダウ状態を、狙う方向に対する「Dow Family」判定へ写像する (手法G2-⑧③)。
+
+    買い (direction>0) の場合:
+      - UP           → ALIGNED  (完全な順行。強度 高)
+      - DOWN_SUSPECT → REVERSAL (下降が安値切り上げ=反転の初動。第2波→第3波。強度 中)
+      - UP_SUSPECT   → NEUTRAL  (上昇の勢い減退。加点なし・vetoなし)
+      - UNDEFINED    → NEUTRAL  (方向未確定。加点なし・vetoなし)
+      - DOWN         → CONFLICT (明確な下降 = 落ちるナイフ。クラスタ破壊)
+    売り (direction<0) は UP↔DOWN・*_SUSPECT を反転した対称判定。
+    """
+    if direction not in (+1, -1):
+        raise ValueError("direction must be +1 or -1")
+    up_side = direction > 0
+    if state is (TrendState.UP if up_side else TrendState.DOWN):
+        return "ALIGNED"
+    if state is (TrendState.DOWN_SUSPECT if up_side else TrendState.UP_SUSPECT):
+        return "REVERSAL"
+    if state is (TrendState.DOWN if up_side else TrendState.UP):
+        return "CONFLICT"
+    return "NEUTRAL"
 
 
 @dataclass(frozen=True)

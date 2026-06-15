@@ -237,3 +237,30 @@ class TestDowStateMachine:
         ev = fsm.on_swing(mk_swing("LOW", 1000, 2))
         assert ev.prev_swing.price_int == 990
         assert ev.state_after == fsm.state
+
+
+class TestClassifyDow:
+    """Dow Family 判定マトリクス (手法G2-⑧③)。"""
+
+    def test_buy_side(self):
+        from infers.analysis.dow import classify_dow
+        assert classify_dow(TrendState.UP, +1) == "ALIGNED"            # 順行 (強度高)
+        assert classify_dow(TrendState.DOWN_SUSPECT, +1) == "REVERSAL"  # 反転初動 (強度中)
+        assert classify_dow(TrendState.UP_SUSPECT, +1) == "NEUTRAL"    # 勢い減退 (加点なし)
+        assert classify_dow(TrendState.UNDEFINED, +1) == "NEUTRAL"
+        assert classify_dow(TrendState.DOWN, +1) == "CONFLICT"         # 落ちるナイフ (破壊)
+
+    def test_sell_side_is_mirror(self):
+        from infers.analysis.dow import classify_dow
+        assert classify_dow(TrendState.DOWN, -1) == "ALIGNED"
+        assert classify_dow(TrendState.UP_SUSPECT, -1) == "REVERSAL"
+        assert classify_dow(TrendState.DOWN_SUSPECT, -1) == "NEUTRAL"
+        assert classify_dow(TrendState.UNDEFINED, -1) == "NEUTRAL"
+        assert classify_dow(TrendState.UP, -1) == "CONFLICT"
+
+    def test_invalid_direction(self):
+        import pytest
+
+        from infers.analysis.dow import classify_dow
+        with pytest.raises(ValueError):
+            classify_dow(TrendState.UP, 0)

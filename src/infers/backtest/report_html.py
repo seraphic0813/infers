@@ -802,6 +802,9 @@ function select(i) {
       <div class="k">方向 / マクロ</div><div>${dir > 0 ? "買い" : "売り"} (ダウ ${f.dow_state}) /
         マクロダウ ${f.macro_dow ?? "-"} / 第2波TF ${f.wave2_tf ?? "M5"}</div>
       <div class="k">コンフルエンス</div><div>${f.families} (cluster_score=${f.cluster_score})</div>
+      <div class="k">根拠強度</div><div>ダウ ${f.dow_strength ?? "-"} / RSI ${f.rsi_strength ?? "-"}
+        (上位足 順${f.rsi_mtf_aligned ?? "-"}/逆${f.rsi_mtf_conflict ?? "-"}) /
+        SMA ${f.sma_strength ?? "-"} / SR ${f.sr_strength ?? "-"}</div>
       <div class="k">押し目/戻り深さ</div><div>${(depth * 100).toFixed(1)}% (基準=直近スイング高安) ${depthOk}</div>
       <div class="k">半分利確トリガー</div><div>${halfTrig} (RSI / SMA90 / SR のいずれか)</div>
       <div class="k">rsi / band</div><div>現在 ${f.rsi} → 到達予測 ${f.rsi_band} (eta ${f.eta_bars} 本)</div>

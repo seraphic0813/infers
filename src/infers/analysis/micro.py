@@ -161,46 +161,52 @@ class RsiExtremeDetector:
         return fired
 
 
-# 上位足RSIトリガーの既定リバウンド許容窓 (手法G2-⑤)。
-# 押し目/戻りが完成する頃には上位足RSIが極値から戻っている (反発/反落) ため、
-# 「今まさに圏内」だけでなく直近 lookback 本以内の圏内到達も有効トリガーとする。
-RSI_REVERSAL_LOOKBACK = 3
+# RSI極値トリガーの既定有効時間窓 (手法G2-⑤ ④「突入イベント化」)。
+# 突入したクロス足を含め、その後 RSI_EVENT_WINDOW 本まで根拠を有効とする
+# (押し目/戻り完成時に極値から反発/反落していても窓の間は有効。0 で突入足のみ)。
+RSI_EVENT_WINDOW = 3
 
 
 class RsiExtremeRecency:
-    """RSI が「極値圏に到達」または「そこから反発/反落した直後」かを判定する。
+    """RSI極値の「突入イベント化」+ 有効時間窓 (手法G2-⑤ ②③④)。
 
-    手法G2-⑤の上位足RSIトリガーは「≤30(買)/≥70(売)に到達、**または
-    そこから反発/反落**」で成立する。現在値が圏内 (到達) でも、圏外へ抜けた
-    直後 (反発/反落) でも、最後に圏内だった確定足からの経過本数が lookback 以内
-    なら active=True を返す (lookback=0 で従来の「現在圏内のみ」と等価)。
+    RSI が極値圏へ「上(下)から割り込んだ最初のクロス(突入)」を **1回だけ**
+    イベント化し、突入足を含め window 本のあいだ active=True とする。意図は2つ:
+
+      - **スパム防止 (④)**: 極値圏への長期滞在 (ベタ付き) でも再発火させず、
+        単一イベントとして扱う。窓を過ぎれば圏内でも active=False になる。
+      - **反発/反落の許容 (②③)**: 突入後に圏外へ戻っても (反発/反落)、窓の間は
+        「≤30/≥70 に到達、またはそこから反発/反落」した有効根拠として扱う。
 
     確定足の RSI のみ update() する (リペイント禁止: CLAUDE.md 第2条)。
     買い (direction>0) は売られすぎ、売り (direction<0) は買われすぎを参照。
     """
 
-    def __init__(self, lookback: int = RSI_REVERSAL_LOOKBACK) -> None:
-        if lookback < 0:
-            raise ValueError("lookback must be >= 0")
-        self._lookback = lookback
-        self._since_oversold: int | None = None
-        self._since_overbought: int | None = None
+    def __init__(self, window: int = RSI_EVENT_WINDOW) -> None:
+        if window < 0:
+            raise ValueError("window must be >= 0")
+        self._window = window
+        self._prev_oversold = False
+        self._prev_overbought = False
+        self._rem_oversold = 0          # 残り有効バー (>0 で active)
+        self._rem_overbought = 0
 
     def update(self, rsi: Decimal) -> None:
-        zone = classify_rsi(rsi)
-        self._since_oversold = (
-            0 if zone == "OVERSOLD"
-            else None if self._since_oversold is None
-            else self._since_oversold + 1
-        )
-        self._since_overbought = (
-            0 if zone == "OVERBOUGHT"
-            else None if self._since_overbought is None
-            else self._since_overbought + 1
-        )
+        in_oversold = rsi <= RSI_OVERSOLD
+        in_overbought = rsi >= RSI_OVERBOUGHT
+        # 突入 (圏外→圏内のクロス) でのみ窓をリセット。圏内滞在中は再点火しない。
+        if in_oversold and not self._prev_oversold:
+            self._rem_oversold = self._window + 1
+        elif self._rem_oversold > 0:
+            self._rem_oversold -= 1
+        if in_overbought and not self._prev_overbought:
+            self._rem_overbought = self._window + 1
+        elif self._rem_overbought > 0:
+            self._rem_overbought -= 1
+        self._prev_oversold = in_oversold
+        self._prev_overbought = in_overbought
 
     def active(self, direction: int) -> bool:
         if direction not in (+1, -1):
             raise ValueError("direction must be +1 or -1")
-        since = self._since_oversold if direction > 0 else self._since_overbought
-        return since is not None and since <= self._lookback
+        return (self._rem_oversold if direction > 0 else self._rem_overbought) > 0
