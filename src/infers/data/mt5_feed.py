@@ -28,7 +28,8 @@ class MT5Feed(MarketFeed):
     def __init__(
         self,
         *,
-        server_utc_offset: timedelta = timedelta(0),
+        server_utc_offset: timedelta | None = None,
+        auto_detect_offset: bool = True,
         poll_interval_s: float = 1.0,
         terminal_path: str | None = None,
         login: int | None = None,
@@ -39,9 +40,14 @@ class MT5Feed(MarketFeed):
         reconnect_max_s: float = 60.0,     # 再接続バックオフの上限待機
         max_reconnect_attempts: int = 10,  # 連続再接続の試行上限 (超過で FeedError)。0=無制限
     ) -> None:
-        # server_utc_offset: ブローカーサーバー時刻 − UTC。broker.yaml で銘柄/口座別に定義。
-        # MT5 の rates['time'] はサーバー時刻基準の epoch 秒であり、ここで UTC へ正規化する。
-        self._offset = server_utc_offset
+        # server_utc_offset: ブローカーサーバー時刻 − UTC。MT5 の rates['time'] は
+        # サーバー時刻基準の epoch 秒であり、ここで UTC へ正規化する。
+        # 明示指定がなければ初回ポーリング時に symbol_info_tick から実測する
+        # (Vantage は UTC+3 等。これを 0 のままにすると確定足が「未来足」と
+        #  誤判定され iter_closed が永久に何も流さない: フェーズ8 本番接続バグ)。
+        self._offset = server_utc_offset if server_utc_offset is not None else timedelta(0)
+        self._auto_offset = auto_detect_offset and server_utc_offset is None
+        self._offset_detected = False
         self._poll_interval_s = poll_interval_s
         self._poll_lookback = max(1, poll_lookback)
         self._reconnect_base_s = reconnect_base_s
@@ -100,6 +106,27 @@ class MT5Feed(MarketFeed):
         """MT5 の rates['time'] (サーバー時刻基準 epoch 秒) → tz-aware UTC。"""
         return datetime.fromtimestamp(int(epoch_s), tz=timezone.utc) - self._offset
 
+    def _ensure_offset(self, spec: SymbolSpec) -> None:
+        """サーバー時刻オフセット未確定なら symbol_info_tick から1回だけ実測する。
+
+        明示指定があれば何もしない。検出不能 (古いモック・APIなし・tick欠落) は
+        0 のままにフォールバックし、例外で稼働を止めない。ブローカー非依存・DST対応。
+        """
+        if not self._auto_offset or self._offset_detected:
+            return
+        self._offset_detected = True
+        mt5 = self._mt5
+        if mt5 is None:
+            return
+        try:
+            tick = mt5.symbol_info_tick(spec.name)
+            t = getattr(tick, "time", 0) if tick is not None else 0
+            if t:
+                now = utc_now().timestamp()
+                self._offset = timedelta(hours=round((t - now) / 3600.0))
+        except Exception:                       # noqa: BLE001 — 検出失敗は 0 へフォールバック
+            pass
+
     def _row_to_candle(self, row: Any, spec: SymbolSpec, tf: Timeframe) -> Candle:
         """MT5 の rates 1行 (numpy structured row, float価格) → Candle。
 
@@ -138,6 +165,7 @@ class MT5Feed(MarketFeed):
         ensure_utc(start, "start")
         ensure_utc(end, "end")
         mt5 = self._require_mt5()
+        self._ensure_offset(spec)
 
         # copy_rates_range はサーバー時刻基準で範囲指定するため逆変換して渡す
         rates = mt5.copy_rates_range(
@@ -181,6 +209,7 @@ class MT5Feed(MarketFeed):
           - stop セットで速やかに終了する。
         """
         last_open: datetime | None = None
+        self._ensure_offset(spec)
 
         while stop is None or not stop.is_set():
             rates = self._poll_with_reconnect(spec, tf, stop)

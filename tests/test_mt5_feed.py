@@ -142,6 +142,48 @@ class TestGapBackfill:
         assert fake.range_calls == []          # 連続 → range取得なし
 
 
+class _Tick:
+    def __init__(self, t):
+        self.time = t
+
+
+class TestOffsetAutoDetect:
+    """サーバー時刻オフセットの初回実測 (本番接続バグ修正: UTC+3 等)。"""
+
+    def test_detects_offset_from_tick(self, monkeypatch):
+        from datetime import datetime, timedelta
+
+        now = datetime(2026, 6, 16, 12, 0, tzinfo=UTC)
+        monkeypatch.setattr(mt5_feed, "utc_now", lambda: now)
+        fake = FakeMt5(_series(0), [])
+        # サーバー時刻 = UTC+3 (tick.time が3時間先)
+        fake.symbol_info_tick = lambda name: _Tick(int(now.timestamp()) + 3 * 3600)
+        feed = _make_feed(fake)                 # auto_detect_offset 既定 True
+        feed._ensure_offset(GOLD)
+        assert feed._offset == timedelta(hours=3)
+        # 2回目は再検出しない
+        fake.symbol_info_tick = lambda name: _Tick(int(now.timestamp()) + 9 * 3600)
+        feed._ensure_offset(GOLD)
+        assert feed._offset == timedelta(hours=3)
+
+    def test_explicit_offset_disables_autodetect(self):
+        from datetime import timedelta
+
+        fake = FakeMt5(_series(0), [])
+        fake.symbol_info_tick = lambda name: _Tick(0)
+        feed = _make_feed(fake, server_utc_offset=timedelta(hours=2))
+        feed._ensure_offset(GOLD)
+        assert feed._offset == timedelta(hours=2)
+
+    def test_missing_tick_api_falls_back_to_zero(self):
+        from datetime import timedelta
+
+        fake = FakeMt5(_series(0), [])          # symbol_info_tick を持たない
+        feed = _make_feed(fake)
+        feed._ensure_offset(GOLD)               # 例外を出さず 0 へフォールバック
+        assert feed._offset == timedelta(0)
+
+
 class TestReconnect:
     def test_recovers_from_transient_disconnect(self):
         """copy_rates が一度 None (切断) → 再初期化して回復し、以降を流す。"""
