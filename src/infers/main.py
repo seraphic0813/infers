@@ -30,7 +30,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from infers.ai.gateway import AiGateway, AnthropicLlmClient, EscalationPolicy, VerdictCache
+from infers.ai.gateway import (
+    PROMPT_VERSION, AiGateway, AnthropicLlmClient, EscalationPolicy, VerdictCache,
+)
 from infers.ai.rule_judge import RuleBasedLlmClient
 from infers.core.loop import ProviderOutput, SignalProvider
 from infers.data.models import Candle, SymbolSpec, Timeframe
@@ -101,6 +103,18 @@ def build_provider(args: argparse.Namespace) -> SignalProvider:
     from infers.strategy.provider import InfersSignalProvider, ProviderConfig
     rsi_mtfs = (() if args.no_rsi_mtf
                 else tuple(Timeframe(t) for t in args.rsi_mtf))
+    macro_k = (Decimal(str(args.macro_k_atr_reversal))
+               if args.macro_k_atr_reversal is not None else None)
+    micro_k = (Decimal(str(args.micro_k_atr_reversal))
+               if args.micro_k_atr_reversal is not None else None)
+    depth_kw = ({"depth_max": Decimal(str(args.depth_max))}
+                if args.depth_max is not None else {})
+    if args.depth_tier:
+        depth_kw["depth_tier"] = True
+    if args.depth_max_shallow is not None:
+        depth_kw["depth_max_shallow"] = Decimal(str(args.depth_max_shallow))
+    if args.shallow_min_families is not None:
+        depth_kw["shallow_min_families"] = args.shallow_min_families
     cfg = ProviderConfig(macro_filter=not args.no_macro_filter,
                          macro_tf=Timeframe(args.macro_tf),
                          wave2_tf=Timeframe(args.wave2_tf),
@@ -108,7 +122,10 @@ def build_provider(args: argparse.Namespace) -> SignalProvider:
                          score_fib=not args.no_fib_score,
                          depth_screen=args.depth_screen,
                          macro_wave2=args.macro_wave2,
-                         be_sl_macro_tf=args.be_sl_macro_tf)
+                         be_sl_macro_tf=args.be_sl_macro_tf,
+                         macro_k_atr_reversal=macro_k,
+                         micro_k_atr_reversal=micro_k,
+                         **depth_kw)
     return InfersSignalProvider(symbol=args.symbol, tf=Timeframe(args.tf), config=cfg)
 
 
@@ -151,6 +168,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="judge: 投入リクエストを先頭N件に制限する "
                         "(本番投入前の少額パイロット検証用)")
     p.add_argument("--max-bars", type=int, help="live: 処理バー数上限 (検証用)")
+    p.add_argument("--journal", metavar="PATH",
+                   help="live: 追記専用ジャーナル(イベントソーシング)JSONLの出力先 "
+                        "(省略時 work/journal/<symbol>_<UTC日付>.jsonl)。"
+                        "python -m infers.journal replay で点検・回帰検証できる")
     # HTMLレポート (backtest: 人間によるチェック用の可視化)
     p.add_argument("--report", metavar="DIR",
                    help="backtest: HTMLレポート出力ディレクトリ "
@@ -186,10 +207,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="RSIマルチTFを無効化 (M5単独RSIの従来挙動)")
     p.add_argument("--no-macro-filter", action="store_true",
                    help="マクロ方向フィルターを無効化 (ミクロ単独方向の従来挙動)")
+    p.add_argument("--macro-k-atr-reversal", type=float, default=None,
+                   help="マクロ方向TF(--macro-tf)専用のZigZag反転閾値 k (theta=k*ATR)。"
+                        "省略時は既定値(1.5)を共有。"
+                        "1.5はD1ダウのDOWN比率が最大化する較正点のため、"
+                        "マクロのみ1.0前後への独立較正に使う")
+    p.add_argument("--micro-k-atr-reversal", type=float, default=None,
+                   help="ミクロ(M5)+押し目TF(--wave2-tf)+建値SL駆動用のZigZag反転閾値 k。"
+                        "省略時は既定値(1.5)を共有。--macro-k-atr-reversal の較正が"
+                        "ミクロのノイズ耐性・建値SL移動ロジックに干渉しないよう分離する")
     p.add_argument("--no-fib-score", action="store_true",
                    help="FIBをコンフルエンス・スコアから除外 (中核根拠の水増し防止)")
     p.add_argument("--depth-screen", action="store_true",
                    help="深さスクリーニング(下方40パーセントの深い押し目のみ)を有効化。本物の第2波が前提")
+    p.add_argument("--depth-max", type=float, default=None,
+                   help="深さスクリーニングの許容押し目位置 (第1波スパン下方割合)。"
+                        "既定0.40=戻り60%%以上の深押しのみ。値を上げると浅い押し目を許容"
+                        "(0.50=戻り50%%以上, 0.618=戻り38.2%%以上)。急騰相場の浅く速い"
+                        "押し目買いの取りこぼし対策。40%%は原典に無いシステム独自値のため緩和可")
+    p.add_argument("--depth-tier", action="store_true",
+                   help="深さ階層化: 深い押し目(戻り≥60%%=--depth-max内)は2 familyで許可、"
+                        "浅い押し目(戻り38.2〜60%%)は--shallow-min-families以上+上位足RSI極値の"
+                        "壁を必須として例外許可。浅い押し目はSL距離が遠い分コンフルエンスで補う")
+    p.add_argument("--depth-max-shallow", type=float, default=None,
+                   help="深さ階層化の浅い押し目の外側境界 (既定0.618=戻り38.2%%)")
+    p.add_argument("--shallow-min-families", type=int, default=None,
+                   help="深さ階層化の浅い押し目に要求するコンフルエンス数 (既定3)")
     p.add_argument("--macro-wave2", action="store_true",
                    help="上位足(--wave2-tf)のエリオットで第2波を判定 (M5ノイズでなく本物の波)")
     p.add_argument("--be-sl-macro-tf", action="store_true",
@@ -434,6 +477,27 @@ def run_replay(args: argparse.Namespace) -> int:
     return run_backtest(args)
 
 
+def _open_live_journal(args: argparse.Namespace):
+    """ライブ用の追記専用ジャーナルを開き、SESSIONイベントを記録して返す。"""
+    from infers.journal import JournalWriter
+
+    if args.journal:
+        path = Path(args.journal)
+    else:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+        path = Path("work/journal") / f"{args.symbol}_{stamp}.jsonl"
+    journal = JournalWriter(path)
+    journal.record("SESSION", {
+        "mode": "live",
+        "symbol": args.symbol,
+        "tf": args.tf,
+        "ai_client": args.ai_client,
+        "demo": bool(args.demo and not args.allow_real_account),
+        "prompt_version": PROMPT_VERSION,
+    })
+    return journal
+
+
 def run_live(args: argparse.Namespace) -> int:
     from infers.data.mt5_feed import MT5Feed
     from infers.execution.mt5_adapter import LiveRunner, MT5LiveBroker
@@ -446,6 +510,8 @@ def run_live(args: argparse.Namespace) -> int:
     spec = SYMBOLS[args.symbol]
     feed = MT5Feed()
     broker = MT5LiveBroker(spec)
+    journal = _open_live_journal(args)
+    print(f"journal: {journal.path}")
     feed.connect()
     broker.connect()
     try:
@@ -454,13 +520,23 @@ def run_live(args: argparse.Namespace) -> int:
             provider=build_provider(args),
             gateway=_build_gateway(args, cache_only=False),
             risk=RiskManager(DEFAULT_RISK), fsm_config=DEFAULT_FSM,
+            journal=journal,
         )
-        bars = runner.run(max_bars=args.max_bars)
-        print(f"processed {bars} closed bars")
-        runner.shutdown()
+        try:
+            bars = runner.run(max_bars=args.max_bars)
+            print(f"processed {bars} closed bars")
+        except KeyboardInterrupt:
+            # Ctrl+C による手動停止 (デモ運用のニュース回避手順)。安全停止へ回す。
+            print("interrupted — graceful shutdown", file=sys.stderr)
+        # 正常終了・中断のいずれでも安全停止: 未約定の打診指値を取消し残玉を手仕舞う
+        # (停止後にブローカーへ孤児注文を残さない。デモのニュース前停止が安全になる)。
+        closed = runner.shutdown()
+        if closed:
+            print(f"shutdown: cancelled/closed {len(closed)} position(s): {closed}")
         return 0
     finally:
         feed.close()
+        journal.close()
 
 
 def run_export(args: argparse.Namespace) -> int:

@@ -353,6 +353,8 @@ class LiveRunner:
         fsm_config: FsmConfig,
         event_source: Callable[[Candle], list[BrokerEvent]] | None = None,
         spread_fn: Callable[[], int] | None = None,
+        journal=None,                             # JournalSink (ライブのみ)
+        reconcile_every_bars: int = 12,           # 定期リコンサイル間隔 (0=無効。M5で12=1時間)
     ) -> None:
         self._feed = feed
         self._spec = spec
@@ -362,11 +364,18 @@ class LiveRunner:
         self._risk = risk
         self._event_source = event_source or (lambda _c: broker.poll_events())
         self._spread_fn = spread_fn or broker.current_spread_ticks
+        self._journal = journal
         self.loop = TradingLoop(broker=broker, gateway=gateway,
-                                risk=risk, fsm_config=fsm_config)
+                                risk=risk, fsm_config=fsm_config, journal=journal)
+        # リコンサイルの継続実行 (フェーズ8 #6): 起動時に加え、稼働中も
+        # (a) 定期 (reconcile_every_bars 本ごと) と (b) フィード再接続復帰直後に
+        # 状態を再同期する。再接続検知はフィードの reconnect_count 増分で行う。
+        self._reconcile_every_bars = reconcile_every_bars
+        self._bars_since_reconcile = 0
+        self._last_reconnect_seen = getattr(feed, "reconnect_count", 0)
 
-    def reconcile(self) -> ReconcileReport:
-        """ローカル状態機械とブローカー実態の強制同期 (起動時・再接続時)。
+    def reconcile(self, *, reason: str = "startup") -> ReconcileReport:
+        """ローカル状態機械とブローカー実態の強制同期 (起動時・再接続時・定期)。
 
         - 未処理イベント (切断中の約定/SLヒット) を FSM の正規経路で再生
         - SLのズレはローカル (単調性保証済みのジャーナル値) を正として修復
@@ -380,7 +389,23 @@ class LiveRunner:
         if not report.ok:
             self._risk.engage_kill_switch(
                 "RECONCILE_MISMATCH: " + "; ".join(report.orphans + report.mismatches))
+        if self._journal is not None:
+            # リコンサイル結果も「判断」として残す (CLAUDE.md 第11条)。
+            self._journal.record("RECONCILE", {
+                "reason": reason,
+                "ok": report.ok,
+                "replayed_events": len(report.events),
+                "sl_repairs": len(report.sl_repairs),
+                "orphans": list(report.orphans),
+                "mismatches": list(report.mismatches),
+            })
+        self._bars_since_reconcile = 0
         return report
+
+    def _maybe_reconcile(self, reason: str) -> None:
+        """ブローカーが snapshot を提供する場合のみ同期する (Sim等は no-op)。"""
+        if hasattr(self._broker, "snapshot"):
+            self.reconcile(reason=reason)
 
     def run(self, *, stop: threading.Event | None = None,
             max_bars: int | None = None) -> int:
@@ -388,16 +413,29 @@ class LiveRunner:
 
         確定足主義 (CLAUDE.md 第2条): iter_closed は形成中バーを
         決して流さないため、本ループに未確定データは到達しない。
-        起動時にブローカーが snapshot を提供する場合はまずリコンサイルする。
+        リコンサイル (フェーズ8 #6): 起動時に加え、再接続復帰直後 (新規判断の前) と
+        一定本数ごとに状態を再同期し「リコンサイル不一致ゼロ」を維持する。
         """
-        if hasattr(self._broker, "snapshot"):
-            self.reconcile()
+        self._maybe_reconcile("startup")
         bars = 0
         for candle in self._feed.iter_closed(self._spec, self._tf, stop=stop):
+            # 切断から復帰した直後は、新規判断の前に状態を実態へ合わせ直す
+            seen = getattr(self._feed, "reconnect_count", 0)
+            if seen != self._last_reconnect_seen:
+                self._last_reconnect_seen = seen
+                self._maybe_reconcile("post-reconnect")
+
             self.loop.on_broker_events(self._event_source(candle))
             output = self._provider.on_candle(candle)
             self.loop.on_candle(candle, output, spread_ticks=self._spread_fn())
             bars += 1
+
+            # 定期リコンサイル (安全網: あらゆる原因のズレを上限間隔内に検出)
+            self._bars_since_reconcile += 1
+            if (self._reconcile_every_bars
+                    and self._bars_since_reconcile >= self._reconcile_every_bars):
+                self._maybe_reconcile("periodic")
+
             if max_bars is not None and bars >= max_bars:
                 break
         return bars

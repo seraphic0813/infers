@@ -20,20 +20,25 @@
 - パッケージレイアウト: `src/infers/`(設計書 §1.2 のディレクトリ構成に従う。新モジュールを勝手な場所に作らない)
 - APIキー・口座資格情報は環境変数のみ。コード・設定ファイル・ログ・ジャーナルに書かない
 
-## 主要コマンド(方針)
+## 主要コマンド(2026-06-15 実装に合わせて確定)
 
-実装が進むまでは以下の規約でCLIを整備する(`python -m infers.<cmd>` 形式、エントリは `pyproject.toml` の scripts に登録):
+全モードは単一エントリ `python -m infers.main --mode <mode> ...` から実行する
+(`pyproject.toml` の `[project.scripts]` 登録は将来課題。詳細は `infers.main` のモジュール
+docstring):
 
 | コマンド | 用途 |
 |---|---|
-| `pytest` / `pytest -m property` | 単体テスト / hypothesis プロパティテスト(状態機械の不変条件) |
-| `python -m infers.backtest run --config config/bt.yaml` | Pass1: L0決定論スイープ(設計書 §7.4) |
-| `python -m infers.backtest judge --batch` | Pass2: 裁定イベントを Batches API へ投入し verdict_cache に永続化 |
-| `python -m infers.backtest replay` | Pass3: verdict_cache 参照の最終リプレイ+メトリクス出力 |
-| `python -m infers.journal replay --from <ts>` | ジャーナルのゴールデンリプレイ(同一入力→同一判断の回帰検証) |
-| `python -m infers.live --symbol XAUUSD --demo` | ライブ稼働(デモ必須から開始) |
+| `pytest` / `pytest -m property` | 単体テスト / hypothesis プロパティテスト(状態機械の不変条件)。258件合格(2026-06-15) |
+| `python -m infers.main --mode backtest --data <parquet> [--report DIR] ...` | L0決定論スイープ+ルールベース($0)/キャッシュ済みverdictでのバックテスト。v1.0確定構成は `reports/README.md` 再生成コマンド参照 |
+| `python -m infers.main --mode judge --data <parquet> --batch [--tier L1\|L2]` | Pass1: 裁定イベントをBatch APIリクエスト(JSONL)に書き出す |
+| `python -m infers.main --mode judge --submit` / `--fetch <BATCH_ID>` / `--ingest <results.jsonl>` | Batches API投入/結果取得/取込 → `verdict_cache`へ永続化 |
+| `python -m infers.main --mode replay --data <parquet> --verdict-cache <db>` | Pass2: verdict_cache参照の最終リプレイ(`backtest`と同一実装) |
+| `python -m infers.main --mode live --demo [--symbol XAUUSD] [--max-bars N] [--journal PATH]` | ライブ稼働(デモ必須。実口座は`--allow-real-account`明示が必要)。判断は追記専用ジャーナル(既定 `work/journal/<symbol>_<UTC日付>.jsonl`)へ永続化 |
+| `python -m infers.journal replay --file <path> [--from <ts>]` | ジャーナルの要約 + ゴールデン回帰検証(ルールゲートのセッションは記録済み特徴量を `judge_features` へ再投入し同一判断を確認)。実装は `src/infers/journal.py` |
+| `python -m infers.main --mode export --data <out.parquet> --years 5` | MT5からヒストリカルデータをParquetへ書き出し |
 
-- テストはCIで `pytest` 全件+ゴールデンリプレイを必須とする。状態機械・注文ロジックの変更はプロパティテスト追加なしにマージしない。
+- テストはCIで `pytest` 全件を必須とする。状態機械・注文ロジックの変更はプロパティテスト追加なしにマージしない。
+- ゴールデンリプレイ(同一入力→同一判断の回帰検証)は `tests/test_journal.py` でカバー。ルールゲート($0・決定論)のセッションについて、ジャーナルの特徴量スナップショットから判定が再現されることを検証する。LLMゲート(`--ai-client claude`)は非決定論のため対象外。
 
 ## コード記述の厳格なルール
 

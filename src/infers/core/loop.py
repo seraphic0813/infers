@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Iterable, Protocol
+from typing import Callable, Iterable, Protocol
 
 from infers.ai.gateway import AiGateway, JudgementRequest
 from infers.analysis.dow import StructureEvent
@@ -64,15 +64,30 @@ class SignalProvider(Protocol):
     def on_candle(self, candle: Candle) -> ProviderOutput: ...
 
 
+class JournalSink(Protocol):
+    """追記専用ジャーナルへの記録口 (CLAUDE.md 第11条)。
+
+    具象は infers.journal.JournalWriter。loop はこの構造的プロトコルにのみ
+    依存し、ファイルI/Oの詳細・import を持たない (戦略コアの純粋性: 第12条)。
+    """
+
+    def set_bar(self, bar_time: datetime) -> None: ...
+    def record(self, kind: str, data: dict) -> None: ...
+    def fsm_sink(self, position_id: str) -> Callable[[str, dict], None]: ...
+
+
 class TradingLoop:
     """ポジション群のオーケストレーション (モード非依存の中核)。"""
 
     def __init__(self, *, broker: BrokerPort, gateway: AiGateway,
-                 risk: RiskManager, fsm_config: FsmConfig) -> None:
+                 risk: RiskManager, fsm_config: FsmConfig,
+                 journal: "JournalSink | None" = None) -> None:
         self._broker = broker
         self._gateway = gateway
         self._risk = risk
         self._fsm_cfg = fsm_config
+        # 追記専用ジャーナル (ライブのみ注入。None でバックテスト同等の純粋経路)。
+        self._journal = journal
         self.open_positions: dict[str, tuple[PositionFSM, TradePlan]] = {}
         self._current_day: date | None = None
 
@@ -95,6 +110,10 @@ class TradingLoop:
                   spread_ticks: int) -> list[str]:
         """確定足1本を処理し、この足でクローズしたポジションIDを返す。"""
         closed: list[str] = []
+
+        # ジャーナルの決定論アンカー (以降の全イベントをこの確定足に紐づける)
+        if self._journal is not None:
+            self._journal.set_bar(candle.close_time)
 
         # 日次境界 (UTC確定足基準で決定論): 日次損失カウンタ・L2予算をリセット。
         # キルスイッチのラッチは new_day では解除されない (リスク層の契約)。
@@ -140,6 +159,22 @@ class TradingLoop:
             verdict = self._gateway.judge(
                 plan.request,
                 cluster_score=plan.cluster_score, ambiguity=plan.ambiguity)
+            if self._journal is not None:
+                # 判断を特徴量スナップショットとともに記録 (CLAUDE.md 第11条)。
+                # 「ログに出してない判断」を作らない — GO/NO_GO いずれも残す。
+                self._journal.record("VERDICT", {
+                    "plan_id": plan.plan_id,
+                    "direction": plan.direction,
+                    "symbol": plan.request.symbol,
+                    "kind": plan.request.kind.value,
+                    "decision": verdict.decision,
+                    "source": verdict.source,
+                    "confidence": str(verdict.confidence),
+                    "reasons": list(verdict.reasons),
+                    "cluster_score": str(plan.cluster_score),
+                    "ambiguity": str(plan.ambiguity),
+                    "features": plan.request.features,
+                })
             if verdict.decision != "GO":
                 continue
             ok = self._risk.approve(
@@ -149,9 +184,16 @@ class TradingLoop:
                 open_total_volume_steps=open_volume,
             )
             if not ok:
+                if self._journal is not None:
+                    self._journal.record("RISK_REJECT", {
+                        "plan_id": plan.plan_id, "direction": plan.direction,
+                        "volume_steps": plan.volume_steps,
+                        "spread_ticks": spread_ticks})
                 continue
             fsm = PositionFSM(position_id=plan.plan_id, direction=plan.direction,
-                              broker=self._broker, config=self._fsm_cfg)
+                              broker=self._broker, config=self._fsm_cfg,
+                              journal_sink=(self._journal.fsm_sink(plan.plan_id)
+                                            if self._journal is not None else None))
             fsm.place_probe(
                 limit_price_int=plan.limit_price_int,
                 volume_steps=plan.volume_steps, sl_int=plan.sl_int,

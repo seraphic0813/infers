@@ -123,7 +123,15 @@ def fib_retrace_levels(p0_int: int, p1_int: int,
 class ProviderConfig:
     """戦略パラメータ (config/thresholds.yaml から注入。要バックテスト調整)。"""
 
-    k_atr_reversal: Decimal = Decimal("1.5")    # ZigZag反転閾値 = k × ATR
+    k_atr_reversal: Decimal = Decimal("1.5")    # ZigZag反転閾値 = k × ATR (既定値・フォールバック)
+    # マクロ方向TF(macro_tf)専用のZigZag反転閾値。Noneならk_atr_reversalを共有(既定)。
+    # k_atr_reversal=1.5は閾値スイープ中で唯一D1ダウのDOWN比率が売り側に最大化する
+    # 「最悪の谷」(health_check.md追補)であり、マクロのみ独立に較正する用途。
+    macro_k_atr_reversal: Decimal | None = None
+    # ミクロ(M5)+押し目TF(wave2_tf)+建値SL駆動用のZigZag反転閾値。Noneならk_atr_reversalを
+    # 共有(既定=1.5)。マクロ側の較正(macro_k_atr_reversal)がミクロのノイズ耐性・建値SL移動
+    # ロジック(確定遅延)に干渉しないよう分離する(health_check.md追補2)。
+    micro_k_atr_reversal: Decimal | None = None
     sma_periods: tuple[int, ...] = (90, 200)
     rsi_period: int = 14
     rsi_macro_tfs: tuple[Timeframe, ...] = (Timeframe.H1, Timeframe.D1)  # マルチTF RSI (G2-⑤)
@@ -168,9 +176,56 @@ class ProviderConfig:
     # 本物の第2波 (macro_wave2) が前提。M5ノイズの偽第2波では浅い押し目が勝つため既定OFF。
     depth_screen: bool = False                   # True で深い押し目に限定
     depth_max: Decimal = Decimal("0.40")         # 直近スイング幅に対する押し目の最大位置 (下方40%)
+    # 深さ階層化 (ユーザー仕様 2026-06-15): 深い押し目(戻り≥60%=depth_max内)は従来どおり
+    # 2 family で許可。浅い押し目(戻り38.2%〜60%=depth_max〜depth_max_shallow)はSL距離が
+    # 遠くリスクが高い分、shallow_min_families(既定3)以上 かつ「上位足の壁(H1/D1 RSI極値
+    # =htf_rsi_aligned>0)」を必須として例外許可する。
+    # 壁 = 「H1/D1 RSI極値(htf_rsi_aligned)」 または 「H1/D1 200SMAグランビル(htf_sma)」。
+    depth_tier: bool = False                     # True で深さ階層化を有効化
+    depth_max_shallow: Decimal = Decimal("0.618")  # 浅い押し目の外側境界 (戻り38.2%)
+    shallow_min_families: int = 3                # 浅い押し目に要求するコンフルエンス数
+    # 上位足200SMAグランビルの壁 (depth_tier の浅い押し目の許可条件: 上昇相場の押し目買いは
+    # 上向きの上位足200SMAへの反発で起きる)。順方向に傾いた上位足200SMAへ現値が接触している
+    # TF を「壁」として数える。
+    htf_sma_period: int = 200
+    htf_sma_tfs: tuple[Timeframe, ...] = (Timeframe.H1, Timeframe.D1)
     max_swings: int = 24                         # レジサポ用スイングバッファ
     max_grid_points: int = 120
     closes_window: int = 400                     # SMA前方投影用の終値履歴
+
+
+class _HtfSmaWall:
+    """上位足の200SMAグランビル(順方向に傾いたSMAへの押し目接触)を判定する補助。
+
+    granville買②③/売②③の本質 = 「順行方向に傾いた移動平均へ価格が引き戻され反発する」を、
+    確定した上位足バーの (傾き符号 + 現値のSMA接触) で近似する。形成中バーは見ない
+    (確定足主義: CLAUDE.md 第2条)。判定はリペイントしない (確定バーのみで更新)。
+    """
+
+    def __init__(self, period: int, atr_period: int, slope_lookback: int) -> None:
+        self._sma = SMA(period)
+        self._atr = ATR(atr_period)
+        self._hist: deque[Decimal] = deque(maxlen=slope_lookback + 1)
+        self._close: int | None = None
+
+    def update(self, bar: Candle) -> None:
+        self._atr.update(bar.h_int, bar.l_int, bar.c_int)
+        self._sma.update(bar.c_int)
+        self._close = bar.c_int
+        if self._sma.is_ready and self._sma.value is not None:
+            self._hist.append(self._sma.value)
+
+    def aligned(self, direction: int, tol_atr: Decimal) -> bool:
+        """順方向に傾いた上位足SMAへ現値が接触しているか (壁の成立)。"""
+        if (not self._sma.is_ready or not self._atr.is_ready
+                or self._close is None or self._atr.value is None
+                or len(self._hist) < self._hist.maxlen):
+            return False
+        slope = self._hist[-1] - self._hist[0]
+        slope_ok = slope > 0 if direction > 0 else slope < 0
+        tol = tol_atr * self._atr.value
+        touch = abs(Decimal(self._close) - self._hist[-1]) <= tol
+        return slope_ok and touch
 
 
 class InfersSignalProvider:
@@ -214,6 +269,14 @@ class InfersSignalProvider:
              RsiExtremeRecency(self.cfg.rsi_event_window))
             for rtf in self.cfg.rsi_macro_tfs
         ]
+        # 上位足200SMAグランビルの壁 (depth_tier の浅い押し目の許可条件: G2-⑦)。
+        # H1/D1 を独立リサンプル → 200SMA。順方向に傾いたSMAへの現値接触を「壁」とする。
+        self._htf_sma: list[tuple[MacroResampler, _HtfSmaWall]] = [
+            (MacroResampler(symbol, stf),
+             _HtfSmaWall(self.cfg.htf_sma_period, self.cfg.atr_period,
+                         self.cfg.sma_slope_lookback))
+            for stf in self.cfg.htf_sma_tfs
+        ]
 
     # -- パイプライン本体 ----------------------------------------------------------
 
@@ -230,6 +293,7 @@ class InfersSignalProvider:
         self._atr.update(candle.h_int, candle.l_int, candle.c_int)
         self._rsi.update(candle.c_int)
         self._update_rsi_mtf(candle)             # 上位足RSI (H1/D1) を確定時に進める
+        self._update_htf_sma(candle)             # 上位足200SMA (H1/D1) を確定時に進める
 
         output = ProviderOutput()
         # 保有玉の半分利確トリガー (③-1) は毎足の現在RSI/90SMAを使う
@@ -243,7 +307,9 @@ class InfersSignalProvider:
         if self._atr.is_ready:
             atr = self._atr.value
             assert atr is not None
-            theta = max(1, int((self.cfg.k_atr_reversal * atr)
+            micro_k = (self.cfg.micro_k_atr_reversal if self.cfg.micro_k_atr_reversal is not None
+                       else self.cfg.k_atr_reversal)
+            theta = max(1, int((micro_k * atr)
                                .to_integral_value(rounding=ROUND_HALF_EVEN)))
             swing = self._zz.update(candle, reversal_ticks=theta)
             if swing is not None:
@@ -301,7 +367,9 @@ class InfersSignalProvider:
             return None
         m_atr = self._macro_atr.value
         assert m_atr is not None
-        m_theta = max(1, int((self.cfg.k_atr_reversal * m_atr)
+        m_k = (self.cfg.macro_k_atr_reversal if self.cfg.macro_k_atr_reversal is not None
+               else self.cfg.k_atr_reversal)
+        m_theta = max(1, int((m_k * m_atr)
                              .to_integral_value(rounding=ROUND_HALF_EVEN)))
         m_swing = self._macro_zz.update(macro_bar, reversal_ticks=m_theta)
         if m_swing is None:
@@ -318,7 +386,9 @@ class InfersSignalProvider:
             return
         w_atr = self._w2_atr.value
         assert w_atr is not None
-        w_theta = max(1, int((self.cfg.k_atr_reversal * w_atr)
+        micro_k = (self.cfg.micro_k_atr_reversal if self.cfg.micro_k_atr_reversal is not None
+                   else self.cfg.k_atr_reversal)
+        w_theta = max(1, int((micro_k * w_atr)
                              .to_integral_value(rounding=ROUND_HALF_EVEN)))
         swing = self._w2_zz.update(bar, reversal_ticks=w_theta)
         if swing is None:
@@ -334,6 +404,18 @@ class InfersSignalProvider:
                 v = rsi.value
                 if v is not None:
                     recency.update(v)
+
+    def _update_htf_sma(self, candle: Candle) -> None:
+        """上位足(H1/D1)200SMAを、各上位足の確定時に進める (グランビルの壁: G2-⑦)。"""
+        for rs, wall in self._htf_sma:
+            bar = rs.push(candle)
+            if bar is not None:
+                wall.update(bar)
+
+    def _htf_sma_wall(self, direction: int) -> int:
+        """順方向に傾いた上位足200SMAへ現値が接触している TF 数 (グランビルの壁)。"""
+        return sum(1 for _, w in self._htf_sma
+                   if w.aligned(direction, self.cfg.sma_tol_atr))
 
     def _htf_rsi_aligned(self, direction: int) -> int:
         """上位足RSIが順方向にトリガーした TF 数 (買い: ≤30 / 売り: ≥70)。
@@ -419,17 +501,27 @@ class InfersSignalProvider:
         # 40%深さスクリーニング (entry-methodology.md G2-⑥): 直近スイング(第1波)の
         # 深い押し目/戻りに限定。買いは安値に近い下方40%、売りは高値に近い上方40%。
         # 直近安値のすぐ外側にSLを置けるため R/R を最大化する引き付けルール。
+        deep_cut: int | None = None    # 深さ階層化 (depth_tier) の深い/浅い境界
         if self.cfg.depth_screen:
             sw_low = min(wc.pivots[0].price_int, wc.pivots[1].price_int)
             sw_high = max(wc.pivots[0].price_int, wc.pivots[1].price_int)
             sw_span = sw_high - sw_low
             if sw_span > 0:
-                margin = int((self.cfg.depth_max * Decimal(sw_span))
+                # 採用する押し目位置の外側境界。depth_tier 時は浅い押し目まで広げ、
+                # 後段(セル構築後)で深い/浅いを family 数+上位足の壁で出し分ける。
+                outer = (self.cfg.depth_max_shallow if self.cfg.depth_tier
+                         else self.cfg.depth_max)
+                margin = int((outer * Decimal(sw_span))
                              .to_integral_value(rounding=ROUND_HALF_EVEN))
                 if direction > 0:
                     prices = [p for p in prices if p <= sw_low + margin]
                 else:
                     prices = [p for p in prices if p >= sw_high - margin]
+                if self.cfg.depth_tier:
+                    deep_margin = int((self.cfg.depth_max * Decimal(sw_span))
+                                      .to_integral_value(rounding=ROUND_HALF_EVEN))
+                    deep_cut = (sw_low + deep_margin if direction > 0
+                                else sw_high - deep_margin)
             if not prices:
                 return []
 
@@ -461,6 +553,23 @@ class InfersSignalProvider:
         )
         if not cells:
             return []
+        if self.cfg.depth_tier and deep_cut is not None:
+            # 深さ階層化 (ユーザー仕様): 深い押し目(deep_cut 内)は従来どおり >=2 family。
+            # 浅い押し目は SL距離が遠くリスクが高い分、shallow_min_families 以上 かつ
+            # 「上位足の壁」を必須として例外許可する。壁 = H1/D1 RSI極値(htf_rsi_aligned)
+            # または H1/D1 200SMAグランビル(htf_sma)。上昇相場の浅い押し目買いは後者
+            # (上向き上位足200SMAへの反発)で立つ (RSI極値は浅い押し目では成立しにくい)。
+            htf_wall = (self._htf_rsi_aligned(direction) > 0
+                        or self._htf_sma_wall(direction) > 0)
+
+            def _is_deep(price: int) -> bool:
+                return price <= deep_cut if direction > 0 else price >= deep_cut
+
+            cells = [c for c in cells
+                     if _is_deep(c.price_int)
+                     or (htf_wall and len(c.families) >= self.cfg.shallow_min_families)]
+            if not cells:
+                return []
         candidates = propose_limit_orders(
             cells, direction=direction, now=candle.close_time,
             bar_duration=self.tf.duration, price_step=step,

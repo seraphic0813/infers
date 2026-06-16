@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum, auto
-from typing import Protocol
+from typing import Callable, Protocol
 
 from infers.analysis.dow import StructureEvent, StructureEventType, TrendState
 from infers.analysis.support_resistance import SRZone
@@ -82,13 +82,17 @@ class PositionFSM:
     """
 
     def __init__(self, *, position_id: str, direction: int,
-                 broker: BrokerPort, config: FsmConfig) -> None:
+                 broker: BrokerPort, config: FsmConfig,
+                 journal_sink: Callable[[str, dict], None] | None = None) -> None:
         if direction not in (+1, -1):
             raise ValueError("direction must be +1 or -1")
         self.position_id = position_id
         self.direction = direction
         self._broker = broker
         self._cfg = config
+        # 追記専用ジャーナルへの遷移シンク (CLAUDE.md 第11条)。None で純粋な
+        # インメモリ記録のみ (バックテスト/テスト)。ライブでは JournalWriter.fsm_sink。
+        self._journal_sink = journal_sink
 
         self._state = PosState.IDLE
         self._seq = 0
@@ -127,7 +131,10 @@ class PositionFSM:
         return f"{self.position_id}/{self._seq:03d}/{tag}"
 
     def _log(self, transition: str, **payload: object) -> None:
-        self.journal.append((transition, dict(payload, state=self._state.name)))
+        entry = dict(payload, state=self._state.name)
+        self.journal.append((transition, entry))
+        if self._journal_sink is not None:
+            self._journal_sink(transition, entry)
 
     def _require(self, *allowed: PosState) -> None:
         if self._state not in allowed:

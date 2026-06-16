@@ -651,3 +651,106 @@ class TestInfersSignalProvider:
         # 未来コンフルエンスの指値は時間依存: expiry経過で自動取消される (設計書 §5.5)
         assert runner.loop.open_positions == {}
         assert broker.pending_count == 0
+
+
+# ---------------------------------------------------------------------------
+# リコンサイルの継続実行 (フェーズ8 #6: 起動時 + 定期 + 再接続復帰直後)
+# ---------------------------------------------------------------------------
+
+_RISK = RiskConfig(max_position_volume_steps=4, max_total_volume_steps=8,
+                   max_spread_ticks=10, daily_loss_limit_tick_steps=10_000)
+_HOLD = (PosState.PROBE, PosState.ADD, PosState.SL_AT_BE, PosState.RUNNER)
+
+
+def _matching_snapshot(loop) -> BrokerSnapshot:
+    """ループ現状を写したスナップショット (常に一致 → reconcile は ok)。"""
+    positions: dict[str, BrokerPositionState] = {}
+    pending: set[str] = set()
+    for pid, (fsm, _plan) in loop.open_positions.items():
+        if fsm.state is PosState.PROBE_PENDING:
+            pending.add(pid)
+        elif fsm.state in _HOLD:
+            positions[pid] = BrokerPositionState(
+                volume_steps=fsm.volume_steps, sl_int=fsm.sl_int or 0,
+                avg_entry_int=fsm.entry_price_int or 0)
+    return BrokerSnapshot(positions=positions, pending=frozenset(pending))
+
+
+class _ReconnectingFeed(MarketFeed):
+    """指定インデックスで reconnect_count を増やす合成フィード (復帰を模擬)。"""
+
+    def __init__(self, candles: list[Candle], bump_at: int):
+        self._candles = candles
+        self._bump_at = bump_at
+        self.reconnect_count = 0
+
+    def connect(self) -> None: ...
+    def close(self) -> None: ...
+    def get_history(self, spec, tf, start, end): return []
+
+    def iter_closed(self, spec, tf, *, stop=None):
+        for i, c in enumerate(self._candles):
+            if stop is not None and stop.is_set():
+                return
+            if i == self._bump_at:
+                self.reconnect_count += 1
+            yield c
+
+
+class TestReconcileCadence:
+    def _runner(self, *, feed, broker, reconcile_every_bars, journal=None):
+        return LiveRunner(
+            feed=feed, spec=GOLD, tf=Timeframe.M5, broker=broker,
+            provider=ScriptedProvider({}),                # 発注なし → フラット
+            gateway=AiGateway(client=FakeClient(), cache=VerdictCache(), policy=POLICY),
+            risk=RiskManager(_RISK),
+            fsm_config=FsmConfig(min_be_distance_ticks=10, be_offset_ticks=2,
+                                 breakout_buffer_ticks=10),
+            event_source=broker.process_bar, spread_fn=lambda: 2,
+            reconcile_every_bars=reconcile_every_bars, journal=journal)
+
+    def test_periodic_reconcile_runs_every_n_bars(self):
+        broker = LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        runner = self._runner(feed=FakeFeed(CANDLES), broker=broker,
+                              reconcile_every_bars=2)
+        calls: list[int] = []
+        broker.snapshot = lambda: (calls.append(1) or _matching_snapshot(runner.loop))
+        runner.run(max_bars=6)
+        # 起動時(1) + 定期 floor(6/2)=3 = 4
+        assert len(calls) == 4
+
+    def test_reconcile_after_reconnect(self):
+        broker = LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        feed = _ReconnectingFeed(CANDLES, bump_at=3)       # 4本目の取得時に復帰
+        runner = self._runner(feed=feed, broker=broker, reconcile_every_bars=0)
+        calls: list[str] = []
+
+        def snap():
+            calls.append("snap")
+            return _matching_snapshot(runner.loop)
+        broker.snapshot = snap
+        runner.run(max_bars=len(CANDLES))
+        # 起動時(1) + 再接続復帰直後(1) = 2 (定期は無効)
+        assert len(calls) == 2
+
+    def test_no_reconcile_without_snapshot_capability(self):
+        """snapshot を持たない Sim ブローカーでは定期リコンサイルは no-op。"""
+        broker = LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        runner = self._runner(feed=FakeFeed(CANDLES), broker=broker,
+                              reconcile_every_bars=1)
+        runner.run(max_bars=5)                             # 例外なく完走 (no-op)
+        assert runner.loop.open_positions == {}
+
+    def test_reconcile_outcome_is_journaled(self, tmp_path):
+        from infers.journal import JournalWriter, read_journal
+        broker = LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        journal = JournalWriter(tmp_path / "rec.jsonl")
+        runner = self._runner(feed=FakeFeed(CANDLES), broker=broker,
+                              reconcile_every_bars=3, journal=journal)
+        broker.snapshot = lambda: _matching_snapshot(runner.loop)
+        runner.run(max_bars=6)
+        journal.close()
+        recs = [e for e in read_journal(tmp_path / "rec.jsonl") if e.kind == "RECONCILE"]
+        reasons = [r.data["reason"] for r in recs]
+        assert "startup" in reasons and "periodic" in reasons
+        assert all(r.data["ok"] for r in recs)            # 一致スナップショット → 全て ok
