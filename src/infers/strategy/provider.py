@@ -184,6 +184,11 @@ class ProviderConfig:
     depth_tier: bool = False                     # True で深さ階層化を有効化
     depth_max_shallow: Decimal = Decimal("0.618")  # 浅い押し目の外側境界 (戻り38.2%)
     shallow_min_families: int = 3                # 浅い押し目に要求するコンフルエンス数
+    # マクロ順応型 深さスクリーニング (ユーザー仕様 2026-06-17): depth_tier とは逆発想。
+    # D1 200SMA がトレード方向に傾く強トレンド時のみ、許容押し目を浅い側(depth_max_shallow)
+    # まで広げ、通常の2 familyで許可する (強い右肩上がりは浅く速く押す)。弱/逆トレンド時は
+    # 従来どおり深い押し目(depth_max)のみ。壁・3family の追加要求はしない (depth_tier との差)。
+    macro_adaptive_depth: bool = False           # True でマクロ順応型 深さを有効化 (depth_tier と排他)
     # 上位足200SMAグランビルの壁 (depth_tier の浅い押し目の許可条件: 上昇相場の押し目買いは
     # 上向きの上位足200SMAへの反発で起きる)。順方向に傾いた上位足200SMAへ現値が接触している
     # TF を「壁」として数える。
@@ -227,6 +232,17 @@ class _HtfSmaWall:
         touch = abs(Decimal(self._close) - self._hist[-1]) <= tol
         return slope_ok and touch
 
+    def slope_aligned(self, direction: int) -> bool:
+        """上位足SMAがトレード方向に傾いているか (接触不要・右肩上がり/下がり判定)。
+
+        マクロ順応型 深さスクリーニング用。SMA未準備 (ウォームアップ前) は False
+        を返し、保守側 (深い押し目要求) に倒す。
+        """
+        if not self._sma.is_ready or len(self._hist) < self._hist.maxlen:
+            return False
+        slope = self._hist[-1] - self._hist[0]
+        return slope > 0 if direction > 0 else slope < 0
+
 
 class InfersSignalProvider:
     """単一 (symbol, tf) 系列の Narrow Focus パイプライン。"""
@@ -236,6 +252,9 @@ class InfersSignalProvider:
         self.symbol = symbol
         self.tf = tf
         self.cfg = config or ProviderConfig()
+        if self.cfg.depth_tier and self.cfg.macro_adaptive_depth:
+            raise ValueError(
+                "depth_tier と macro_adaptive_depth は排他です (深さの出し分け方が異なる)")
 
         self._smas = {p: SMA(p) for p in self.cfg.sma_periods}
         self._atr = ATR(self.cfg.atr_period)
@@ -417,6 +436,17 @@ class InfersSignalProvider:
         return sum(1 for _, w in self._htf_sma
                    if w.aligned(direction, self.cfg.sma_tol_atr))
 
+    def _macro_trend_strong(self, direction: int) -> bool:
+        """日足200SMAがトレード方向に傾いているか (マクロ順応型 深さの「右肩上がり」判定)。
+
+        macro_adaptive_depth 用。htf_sma_tfs のうち D1 の壁の傾きだけを見る (接触不要)。
+        D1 が無い/未準備なら False (=弱い扱い→深い押し目要求=保守側)。
+        """
+        for stf, (_, wall) in zip(self.cfg.htf_sma_tfs, self._htf_sma):
+            if stf is Timeframe.D1:
+                return wall.slope_aligned(direction)
+        return False
+
     def _htf_rsi_aligned(self, direction: int) -> int:
         """上位足RSIが順方向にトリガーした TF 数 (買い: ≤30 / 売り: ≥70)。
 
@@ -507,10 +537,19 @@ class InfersSignalProvider:
             sw_high = max(wc.pivots[0].price_int, wc.pivots[1].price_int)
             sw_span = sw_high - sw_low
             if sw_span > 0:
-                # 採用する押し目位置の外側境界。depth_tier 時は浅い押し目まで広げ、
-                # 後段(セル構築後)で深い/浅いを family 数+上位足の壁で出し分ける。
-                outer = (self.cfg.depth_max_shallow if self.cfg.depth_tier
-                         else self.cfg.depth_max)
+                # 採用する押し目位置の外側境界。
+                #  - depth_tier: 常に浅い側まで広げ、後段で family数+壁で出し分け。
+                #  - macro_adaptive_depth: D1 200SMA が順方向に傾く強トレンド時のみ
+                #    浅い側まで広げる (通常2 family のまま・後段フィルタなし)。弱/逆は深いまま。
+                #  - 既定: 深い側 (depth_max) のみ。
+                if self.cfg.macro_adaptive_depth:
+                    outer = (self.cfg.depth_max_shallow
+                             if self._macro_trend_strong(direction)
+                             else self.cfg.depth_max)
+                elif self.cfg.depth_tier:
+                    outer = self.cfg.depth_max_shallow
+                else:
+                    outer = self.cfg.depth_max
                 margin = int((outer * Decimal(sw_span))
                              .to_integral_value(rounding=ROUND_HALF_EVEN))
                 if direction > 0:

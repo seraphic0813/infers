@@ -653,6 +653,75 @@ class TestInfersSignalProvider:
         assert broker.pending_count == 0
 
 
+class TestMacroAdaptiveDepth:
+    """マクロ順応型 深さスクリーニング (D1 200SMA の傾きで深さ要求を切替)。"""
+
+    BASE = dict(rsi_period=5, sma_periods=(30,), cooldown_bars=30, macro_filter=False,
+                depth_screen=True, depth_max=Decimal("0.50"),
+                depth_max_shallow=Decimal("0.618"))
+    # provider_series の第1波 = [945, 1155], span=210。
+    # deep cap  = 945 + 0.50 *210 = 1050、shallow cap = 945 + 0.618*210 ≈ 1075。
+
+    def test_slope_aligned_detects_direction(self):
+        from infers.strategy.provider import _HtfSmaWall
+        wall = _HtfSmaWall(period=3, atr_period=3, slope_lookback=4)
+        for px in range(1000, 1100, 10):                  # 上昇系列
+            wall.update(mk_candle(0, px + 2, px - 2, px, tf=Timeframe.D1))
+        assert wall.slope_aligned(+1) is True
+        assert wall.slope_aligned(-1) is False
+
+    def test_slope_aligned_not_ready_is_false(self):
+        from infers.strategy.provider import _HtfSmaWall
+        wall = _HtfSmaWall(period=200, atr_period=14, slope_lookback=5)
+        wall.update(mk_candle(0, 1002, 998, 1000, tf=Timeframe.D1))
+        assert wall.slope_aligned(+1) is False            # SMA未準備 → 保守側
+
+    def test_macro_trend_strong_uses_d1_slope(self):
+        cfg = ProviderConfig(**self.BASE, macro_adaptive_depth=True,
+                             htf_sma_period=3, sma_slope_lookback=4)
+        prov = InfersSignalProvider(symbol="XAUUSD", tf=Timeframe.M5, config=cfg)
+        d1_wall = next(w for stf, (_, w) in zip(cfg.htf_sma_tfs, prov._htf_sma)
+                       if stf is Timeframe.D1)
+        for px in range(1000, 1100, 10):
+            d1_wall.update(mk_candle(0, px + 2, px - 2, px, tf=Timeframe.D1))
+        assert prov._macro_trend_strong(+1) is True
+        assert prov._macro_trend_strong(-1) is False      # 対称: 下向き不一致
+
+    def test_exclusive_with_depth_tier(self):
+        with pytest.raises(ValueError, match="排他"):
+            InfersSignalProvider(symbol="XAUUSD", tf=Timeframe.M5,
+                config=ProviderConfig(**self.BASE, depth_tier=True,
+                                      macro_adaptive_depth=True))
+
+    def test_strong_widens_to_shallow_weak_keeps_deep(self):
+        series = provider_series()
+        strong = InfersSignalProvider(symbol="XAUUSD", tf=Timeframe.M5,
+            config=ProviderConfig(**self.BASE, macro_adaptive_depth=True))
+        strong._macro_trend_strong = lambda d: True        # 強トレンド強制
+        weak = InfersSignalProvider(symbol="XAUUSD", tf=Timeframe.M5,
+            config=ProviderConfig(**self.BASE, macro_adaptive_depth=True))
+        weak._macro_trend_strong = lambda d: False         # 弱トレンド強制
+        sp = [p for c in series for p in strong.on_candle(c).plans]
+        wp = [p for c in series for p in weak.on_candle(c).plans]
+        smax = max((p.limit_price_int for p in sp), default=0)
+        wmax = max((p.limit_price_int for p in wp), default=0)
+        assert smax >= wmax                                # 強は浅い側まで許容 (狭めない)
+        assert all(p.limit_price_int <= 1075 for p in sp)  # shallow cap
+        assert all(p.limit_price_int <= 1050 for p in wp)  # deep cap
+
+    def test_default_off_matches_plain_deep_when_d1_cold(self):
+        """adaptive ON でも D1 200SMA 未準備なら strong=False → 深い押し目のみ
+        (= plain depth_screen と同一。安全側の既定挙動)。"""
+        series = provider_series()
+        plain = InfersSignalProvider(symbol="XAUUSD", tf=Timeframe.M5,
+            config=ProviderConfig(**self.BASE))                       # adaptive off
+        adaptive_cold = InfersSignalProvider(symbol="XAUUSD", tf=Timeframe.M5,
+            config=ProviderConfig(**self.BASE, macro_adaptive_depth=True))  # D1未準備
+        ap = [p.limit_price_int for c in series for p in plain.on_candle(c).plans]
+        bp = [p.limit_price_int for c in series for p in adaptive_cold.on_candle(c).plans]
+        assert ap == bp
+
+
 # ---------------------------------------------------------------------------
 # リコンサイルの継続実行 (フェーズ8 #6: 起動時 + 定期 + 再接続復帰直後)
 # ---------------------------------------------------------------------------

@@ -111,6 +111,8 @@ def build_provider(args: argparse.Namespace) -> SignalProvider:
                 if args.depth_max is not None else {})
     if args.depth_tier:
         depth_kw["depth_tier"] = True
+    if args.macro_adaptive_depth:
+        depth_kw["macro_adaptive_depth"] = True
     if args.depth_max_shallow is not None:
         depth_kw["depth_max_shallow"] = Decimal(str(args.depth_max_shallow))
     if args.shallow_min_families is not None:
@@ -230,7 +232,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "浅い押し目(戻り38.2〜60%%)は--shallow-min-families以上+上位足RSI極値の"
                         "壁を必須として例外許可。浅い押し目はSL距離が遠い分コンフルエンスで補う")
     p.add_argument("--depth-max-shallow", type=float, default=None,
-                   help="深さ階層化の浅い押し目の外側境界 (既定0.618=戻り38.2%%)")
+                   help="深さ階層化/マクロ順応型の浅い押し目の外側境界 (既定0.618=戻り38.2%%)")
+    p.add_argument("--macro-adaptive-depth", action="store_true",
+                   help="マクロ順応型 深さ: D1 200SMAが順方向に傾く強トレンド時のみ浅い押し目"
+                        "(depth_max_shallow まで)を通常2 familyで許可。弱/逆は深い押し目"
+                        "(depth_max)のみ。depth_tierとは排他(逆発想: 強トレンドで緩める)")
     p.add_argument("--shallow-min-families", type=int, default=None,
                    help="深さ階層化の浅い押し目に要求するコンフルエンス数 (既定3)")
     p.add_argument("--macro-wave2", action="store_true",
