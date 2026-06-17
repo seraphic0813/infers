@@ -117,6 +117,8 @@ def build_provider(args: argparse.Namespace) -> SignalProvider:
         depth_kw["depth_max_shallow"] = Decimal(str(args.depth_max_shallow))
     if args.shallow_min_families is not None:
         depth_kw["shallow_min_families"] = args.shallow_min_families
+    if args.expiry_recovery:
+        depth_kw["expiry_recovery"] = True
     cfg = ProviderConfig(macro_filter=not args.no_macro_filter,
                          macro_tf=Timeframe(args.macro_tf),
                          wave2_tf=Timeframe(args.wave2_tf),
@@ -239,6 +241,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "(depth_max)のみ。depth_tierとは排他(逆発想: 強トレンドで緩める)")
     p.add_argument("--shallow-min-families", type=int, default=None,
                    help="深さ階層化の浅い押し目に要求するコンフルエンス数 (既定3)")
+    p.add_argument("--expiry-recovery", action="store_true",
+                   help="失効リカバリー: 打診指値が時間切れ(Expired)でキャンセルされた"
+                        "瞬間にクールダウンを即時解除し、直後の確定足から未来裁量マップを"
+                        "再計算・再提案する。価格×時間のピンポイント合流の取りこぼし対策。"
+                        "無効化(シナリオ崩壊)では解除しない")
     p.add_argument("--macro-wave2", action="store_true",
                    help="上位足(--wave2-tf)のエリオットで第2波を判定 (M5ノイズでなく本物の波)")
     p.add_argument("--be-sl-macro-tf", action="store_true",

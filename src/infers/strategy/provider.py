@@ -157,6 +157,12 @@ class ProviderConfig:
     probe_volume_steps: int = 2
     add_volume_steps: int = 2
     cooldown_bars: int = 12
+    # 失効リカバリー (entry-methodology.md 失効リカバリー節, 2026-06-17): 打診指値が
+    # 「時間切れ (Expired)」でキャンセルされた瞬間にクールダウンを即時解除し、直後の
+    # 確定足から未来裁量マップを再計算・再提案できるようにする。価格×時間のピンポイント
+    # 合流のため相場進行が遅れると未約定失効が起きやすく、これが買いの機会損失の一因。
+    # 無効化 (シナリオ崩壊) では解除しない (※例外)。既定 False でベースライン不変。
+    expiry_recovery: bool = False
     require_core_family: bool = True             # 中核根拠(SMA/RSI)欠如プランをL0で除外 (P6)
     score_fib: bool = True                       # FIBをコンフルエンス・スコアに含めるか (検証用に除外可)
     tp_sr_min_touches: int = 2                   # 半分利確の「重要SRゾーン」最小タッチ数 (§6.4)
@@ -353,6 +359,19 @@ class InfersSignalProvider:
             if output.plans:
                 self._cooldown = self.cfg.cooldown_bars
         return output
+
+    def notify_probe_expired(self, position_id: str | None = None) -> None:
+        """打診指値が「時間切れ (Expired)」でキャンセルされた通知 (執行層→戦略層)。
+
+        失効リカバリー (entry-methodology.md 失効リカバリー②): クールダウンを即時
+        解除し、直後の確定足から `_build_plans` をフルに再開できるようにする。
+        opt-in (`cfg.expiry_recovery`) のときのみ作用し、既定は no-op
+        (ベースライン挙動を1ビットも変えない)。無効化 (シナリオ崩壊) では
+        loop 側が本メソッドを呼ばないため、ここに到達するのは時間切れのみ
+        (※例外: 無効化はリカバリー対象外)。
+        """
+        if self.cfg.expiry_recovery:
+            self._cooldown = 0
 
     def _ready(self) -> bool:
         return (self._atr.is_ready and self._rsi.state is not None

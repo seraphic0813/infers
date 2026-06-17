@@ -341,8 +341,12 @@ class BacktestEngine:
 
     def run(self, candles: Iterable[Candle], provider: SignalProvider, *,
             recorder: "TradeRecorder | None" = None) -> BacktestReport:
+        # 失効リカバリー: 打診の時間切れ失効を provider へ通知しクールダウンを
+        # 即時解除させる (provider 側で opt-in 判定。未実装の provider は no-op)。
+        expiry_sink = getattr(provider, "notify_probe_expired", None)
         loop = TradingLoop(broker=self._broker, gateway=self._gateway,
-                           risk=self._risk, fsm_config=self._fsm_cfg)
+                           risk=self._risk, fsm_config=self._fsm_cfg,
+                           expiry_sink=expiry_sink)
         trades: list[TradeRecord] = []
 
         for candle in candles:

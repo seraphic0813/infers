@@ -98,6 +98,53 @@ class TestDayBoundary:
         assert (gw.new_days, rk.new_days) == (1, 1)
 
 
+class TestExpiryRecoverySink:
+    """失効リカバリー: loop が「時間切れ失効」のみ expiry_sink を呼ぶ。"""
+
+    def _probe_loop(self, sink):
+        from infers.execution.sm import PositionFSM, PosState
+        from infers.core.loop import TradePlan
+        broker = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        t0 = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+        broker.process_bar(_candle(t0))
+        loop = TradingLoop(broker=broker, gateway=_Recorder(), risk=_Recorder(),
+                           fsm_config=FSM_CFG, expiry_sink=sink)
+        fsm = PositionFSM(position_id="pid", direction=+1, broker=broker, config=FSM_CFG)
+        # limit 90 / sl 60 / invalidation 50。終値 105 (>50) なので無効化はしない。
+        fsm.place_probe(limit_price_int=90, volume_steps=2, sl_int=60,
+                        expiry=t0 + 2 * Timeframe.M5.duration, invalidation_price=50)
+        assert fsm.state is PosState.PROBE_PENDING
+        loop.open_positions["pid"] = (fsm, object())
+        return loop, t0
+
+    def test_expired_invokes_sink(self):
+        called: list[str] = []
+        loop, t0 = self._probe_loop(called.append)
+        # expiry 経過した足 (close_time >= expiry) で失効 → sink 発火
+        loop.on_candle(_candle(t0 + 3 * Timeframe.M5.duration),
+                       ProviderOutput(), spread_ticks=2)
+        assert called == ["pid"]
+
+    def test_invalidated_does_not_invoke_sink(self):
+        called: list[str] = []
+        broker = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        t0 = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+        broker.process_bar(_candle(t0))
+        loop = TradingLoop(broker=broker, gateway=_Recorder(), risk=_Recorder(),
+                           fsm_config=FSM_CFG, expiry_sink=called.append)
+        from infers.execution.sm import PositionFSM
+        fsm = PositionFSM(position_id="pid", direction=+1, broker=broker, config=FSM_CFG)
+        # 無効化 50、終値が 40 で割り込む。expiry は遠い未来。
+        fsm.place_probe(limit_price_int=90, volume_steps=2, sl_int=45,
+                        expiry=t0 + 9999 * Timeframe.M5.duration, invalidation_price=50)
+        loop.open_positions["pid"] = (fsm, object())
+        bar = Candle(symbol="XAUUSD", tf=Timeframe.M5,
+                     open_time=t0 + 1 * Timeframe.M5.duration,
+                     o_int=60, h_int=60, l_int=40, c_int=40, volume=1, is_closed=True)
+        loop.on_candle(bar, ProviderOutput(), spread_ticks=2)
+        assert called == []          # シナリオ崩壊はリカバリー対象外
+
+
 # ---------------------------------------------------------------------------
 # 2. FIBリトレースメント水準
 # ---------------------------------------------------------------------------

@@ -563,6 +563,32 @@ class TestInfersSignalProvider:
         plans = [p for c in provider_series() for p in provider.on_candle(c).plans]
         assert plans == []
 
+    def test_notify_probe_expired_resets_cooldown_when_enabled(self):
+        """失効リカバリー: expiry_recovery=True なら notify でクールダウン即時解除。"""
+        cfg = ProviderConfig(rsi_period=5, sma_periods=(30,), cooldown_bars=30,
+                             macro_filter=False, expiry_recovery=True)
+        provider = InfersSignalProvider(symbol="XAUUSD", tf=Timeframe.M5, config=cfg)
+        # プランが出た足でクールダウンが立つまで進める
+        for c in provider_series():
+            if provider.on_candle(c).plans:
+                break
+        assert provider._cooldown > 0
+        provider.notify_probe_expired("XAUUSD/M5/x")
+        assert provider._cooldown == 0
+
+    def test_notify_probe_expired_noop_when_disabled(self):
+        """既定 (expiry_recovery=False) は no-op: クールダウンは維持される。"""
+        cfg = ProviderConfig(rsi_period=5, sma_periods=(30,), cooldown_bars=30,
+                             macro_filter=False)
+        provider = InfersSignalProvider(symbol="XAUUSD", tf=Timeframe.M5, config=cfg)
+        for c in provider_series():
+            if provider.on_candle(c).plans:
+                break
+        before = provider._cooldown
+        assert before > 0
+        provider.notify_probe_expired("XAUUSD/M5/x")
+        assert provider._cooldown == before
+
     def test_macro_filter_blocks_when_macro_unconfirmed(self):
         """マクロフィルター有効時、マクロ足が方向未確定なら発注ゼロ (フルパイプライン配線確認)。
 

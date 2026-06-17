@@ -63,6 +63,10 @@ class SignalProvider(Protocol):
 
     def on_candle(self, candle: Candle) -> ProviderOutput: ...
 
+    def notify_probe_expired(self, position_id: str | None = None) -> None:
+        """打診指値の時間切れ失効を戦略層へ通知 (失効リカバリー)。任意実装。"""
+        ...
+
 
 class JournalSink(Protocol):
     """追記専用ジャーナルへの記録口 (CLAUDE.md 第11条)。
@@ -81,13 +85,20 @@ class TradingLoop:
 
     def __init__(self, *, broker: BrokerPort, gateway: AiGateway,
                  risk: RiskManager, fsm_config: FsmConfig,
-                 journal: "JournalSink | None" = None) -> None:
+                 journal: "JournalSink | None" = None,
+                 expiry_sink: "Callable[[str], None] | None" = None) -> None:
         self._broker = broker
         self._gateway = gateway
         self._risk = risk
         self._fsm_cfg = fsm_config
         # 追記専用ジャーナル (ライブのみ注入。None でバックテスト同等の純粋経路)。
         self._journal = journal
+        # 失効リカバリー: 打診指値が「時間切れ (expired)」でキャンセルされた瞬間に
+        # 戦略プロバイダへ通知し、当該系列のクールダウンを即時解除させるフック。
+        # 無効化 (invalidated = シナリオ崩壊) では呼ばない (entry-methodology.md ※例外)。
+        # None で従来挙動 (リカバリーなし)。プロバイダ側が opt-in を判定するため、
+        # 配線は常時行ってよい (フラグ無効時は no-op)。
+        self._expiry_sink = expiry_sink
         self.open_positions: dict[str, tuple[PositionFSM, TradePlan]] = {}
         self._current_day: date | None = None
 
@@ -128,7 +139,11 @@ class TradingLoop:
         # 既存ポジションの管理 (決定論。AI/リスク層を一切経由しない)
         for pid, (fsm, plan) in list(self.open_positions.items()):
             if fsm.state is PosState.PROBE_PENDING:
-                fsm.on_bar_pending(candle)
+                reason = fsm.on_bar_pending(candle)
+                if reason == "expired" and self._expiry_sink is not None:
+                    # 時間切れ失効 → クールダウン即時解除 (機会損失のリカバリー)。
+                    # 無効化 (シナリオ崩壊) では解除しない。
+                    self._expiry_sink(pid)
             for sev in output.structure_events:
                 fsm.on_structure_event(sev)
             if fsm.state is PosState.PROBE:

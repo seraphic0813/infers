@@ -366,7 +366,9 @@ class LiveRunner:
         self._spread_fn = spread_fn or broker.current_spread_ticks
         self._journal = journal
         self.loop = TradingLoop(broker=broker, gateway=gateway,
-                                risk=risk, fsm_config=fsm_config, journal=journal)
+                                risk=risk, fsm_config=fsm_config, journal=journal,
+                                expiry_sink=getattr(provider, "notify_probe_expired",
+                                                    None))
         # リコンサイルの継続実行 (フェーズ8 #6): 起動時に加え、稼働中も
         # (a) 定期 (reconcile_every_bars 本ごと) と (b) フィード再接続復帰直後に
         # 状態を再同期する。再接続検知はフィードの reconnect_count 増分で行う。

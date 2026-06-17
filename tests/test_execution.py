@@ -339,8 +339,9 @@ class TestLifecycle:
         expiry = T0 + 3 * Timeframe.M5.duration
         fsm.place_probe(limit_price_int=990, volume_steps=2, sl_int=960,
                         expiry=expiry, invalidation_price=950)
-        assert not fsm.on_bar_pending(mk_candle(1, 1005, 995, 1000))   # 未失効
-        assert fsm.on_bar_pending(mk_candle(3, 1005, 995, 1000))       # close_time >= expiry
+        assert fsm.on_bar_pending(mk_candle(1, 1005, 995, 1000)) is None   # 未失効
+        # close_time >= expiry → "expired" を返す (失効リカバリーの判別キー)
+        assert fsm.on_bar_pending(mk_candle(3, 1005, 995, 1000)) == "expired"
         assert fsm.state is PosState.CLOSED
         assert broker.pending_count == 0
 
@@ -351,8 +352,20 @@ class TestLifecycle:
         fsm = PositionFSM(position_id="p", direction=+1, broker=broker, config=CFG)
         fsm.place_probe(limit_price_int=990, volume_steps=2, sl_int=940,
                         expiry=FAR_FUTURE, invalidation_price=950)
-        assert fsm.on_bar_pending(mk_candle(1, 1000, 945, 949))
+        # 無効化は "invalidated" を返す (失効リカバリー対象外の判別キー)
+        assert fsm.on_bar_pending(mk_candle(1, 1000, 945, 949)) == "invalidated"
         assert fsm.state is PosState.CLOSED
+
+    def test_pending_invalidation_priority_over_expiry(self):
+        """失効と無効化が同時成立 → 無効化が優先 (シナリオ崩壊が支配的)。"""
+        broker = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        broker.process_bar(mk_candle(0, 1005, 995, 1000))
+        fsm = PositionFSM(position_id="p", direction=+1, broker=broker, config=CFG)
+        expiry = T0 + 1 * Timeframe.M5.duration
+        fsm.place_probe(limit_price_int=990, volume_steps=2, sl_int=940,
+                        expiry=expiry, invalidation_price=950)
+        # close_time >= expiry かつ 終値 949 < invalidation 950 の両立
+        assert fsm.on_bar_pending(mk_candle(3, 1000, 945, 949)) == "invalidated"
 
     def test_closed_bar_required_everywhere(self):
         broker = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)

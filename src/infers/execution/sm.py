@@ -176,12 +176,17 @@ class PositionFSM:
         self._log("PLACE_PROBE", limit=limit_price_int, sl=sl_int,
                   volume=volume_steps, expiry=expiry.isoformat())
 
-    def on_bar_pending(self, candle: Candle) -> bool:
+    def on_bar_pending(self, candle: Candle) -> str | None:
         """未約定の打診指値の失効・無効化チェック (毎確定足)。
 
         - expiry 経過 → 取消 (合流点は時間依存: 設計書 §5.5)
         - 終値が invalidation_price (エリオット無効化) に抵触 → 取消
-        取消した場合 True。
+        取消理由を返す ("expired" | "invalidated")。取消しなければ None。
+
+        無効化 (invalidated) は「シナリオ自体の崩壊」なので、失効 (expired) の
+        「時間切れによる機会損失」とは扱いが異なる (失効リカバリー: 失効のみ
+        クールダウン即時解除の対象。entry-methodology.md 失効リカバリー※例外)。
+        無効化が優先 (両立時はシナリオ崩壊が支配的でリカバリー対象外)。
         """
         self._require(PosState.PROBE_PENDING)
         self._require_closed_bar(candle)
@@ -190,13 +195,13 @@ class PositionFSM:
         expired = candle.close_time >= self._expiry
         invalidated = self._profit_side(candle.c_int, self._invalidation_price) < 0
         if not (expired or invalidated):
-            return False
+            return None
 
         assert self._limit_order_id is not None
         self._broker.cancel(client_order_id=self._limit_order_id)
         self._state = PosState.CLOSED
         self._log("CANCEL_PROBE", expired=expired, invalidated=invalidated)
-        return True
+        return "invalidated" if invalidated else "expired"
 
     def on_probe_fill(self, fill_price_int: int, volume_steps: int) -> None:
         self._require(PosState.PROBE_PENDING)
