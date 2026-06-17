@@ -281,3 +281,27 @@ class TestServer:
         with pytest.raises(urllib.error.HTTPError) as exc:
             urllib.request.urlopen(req)
         assert exc.value.code == 401
+
+    def test_journal_uses_running_session_file(self, tmp_path, monkeypatch):
+        """稼働中は今日(UTC)の日付ではなくセッションの実ファイルを参照する
+        (UTC 日付跨ぎで監視が空になるロールオーバーバグの回帰防止)。"""
+        monkeypatch.chdir(tmp_path)
+        ctrl = _make_controller(blocking=True)
+        httpd, _token = make_server(port=0, controller=ctrl)
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            ctrl.start(symbol="XAUUSD", login=1, password="p", server="s")
+            for _ in range(300):                  # journal_path が立つまで待つ
+                if ctrl.status().get("journal_path"):
+                    break
+                threading.Event().wait(0.01)
+            port = httpd.server_address[1]
+            j = json.loads(
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/journal").read())
+            # セッションの実ファイル (SESSION 記録済み) が読めている
+            assert j["exists"] is True
+            assert j["counts"].get("SESSION", 0) >= 1
+        finally:
+            ctrl.stop()
+            httpd.shutdown()

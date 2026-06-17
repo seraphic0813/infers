@@ -73,7 +73,11 @@ def make_handler(controller: LiveController, *, token: str, default_symbol: str)
             elif path == "/api/status":
                 self._send_json(controller.status())
             elif path == "/api/journal":
-                jpath = monitor.journal_path_for(self._symbol())
+                # 稼働中セッションの実ファイルを優先する。日付(UTC)で再計算すると
+                # 起動日のファイルに書き続けるセッションと UTC 日付跨ぎでズレて
+                # 監視が空表示になるため (起動層の日付ロールオーバーバグ修正)。
+                jpath = (controller.status().get("journal_path")
+                         or monitor.journal_path_for(self._symbol()))
                 self._send_json(monitor.summarize(jpath))
             else:
                 self._send_json({"error": "not found"}, status=404)
