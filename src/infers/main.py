@@ -172,6 +172,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="judge: 投入リクエストを先頭N件に制限する "
                         "(本番投入前の少額パイロット検証用)")
     p.add_argument("--max-bars", type=int, help="live: 処理バー数上限 (検証用)")
+    p.add_argument("--warm-bars", type=int, default=15000,
+                   help="live: 起動時に歴史バーをプロバイダーへ食わせてウォームアップする本数 "
+                        "(D1 ZigZag+Dow確立には約10本のD1スイングが必要: "
+                        "M5換算で ~15000本(約3ヶ月)を推奨。既定 15000)")
     p.add_argument("--journal", metavar="PATH",
                    help="live: 追記専用ジャーナル(イベントソーシング)JSONLの出力先 "
                         "(省略時 work/journal/<symbol>_<UTC日付>.jsonl)。"
@@ -534,6 +538,7 @@ def run_live(args: argparse.Namespace) -> int:
             gateway=_build_gateway(args, cache_only=False),
             risk=RiskManager(DEFAULT_RISK), fsm_config=DEFAULT_FSM,
             journal=journal,
+            warm_bars=args.warm_bars,
         )
         try:
             bars = runner.run(max_bars=args.max_bars)

@@ -355,6 +355,7 @@ class LiveRunner:
         spread_fn: Callable[[], int] | None = None,
         journal=None,                             # JournalSink (ライブのみ)
         reconcile_every_bars: int = 12,           # 定期リコンサイル間隔 (0=無効。M5で12=1時間)
+        warm_bars: int = 0,                       # 起動前にプロバイダーへ食わせる歴史バー数 (0=無効)
     ) -> None:
         self._feed = feed
         self._spec = spec
@@ -375,6 +376,7 @@ class LiveRunner:
         self._reconcile_every_bars = reconcile_every_bars
         self._bars_since_reconcile = 0
         self._last_reconnect_seen = getattr(feed, "reconnect_count", 0)
+        self._warm_bars = warm_bars
 
     def reconcile(self, *, reason: str = "startup") -> ReconcileReport:
         """ローカル状態機械とブローカー実態の強制同期 (起動時・再接続時・定期)。
@@ -409,6 +411,41 @@ class LiveRunner:
         if hasattr(self._broker, "snapshot"):
             self.reconcile(reason=reason)
 
+    def _warm_provider(self) -> "datetime | None":
+        """プロバイダーをウォームアップする (ブローカー/ループは通さない)。
+
+        macro_tf=D1 の ATR14 準備には 14 D1 本が必要だが、起動直後は
+        iter_closed が未来の新規バーしか流さないため、歴史データが溜まる
+        まで 14日以上エントリーが出ない。これを防ぐため、run() 開始前に
+        get_history で warm_bars 本の歴史 M5 足をプロバイダーのみに食わせる。
+        注文・FSM・リコンサイルには一切触れず、指標のみウォームアップする。
+
+        戻り値: ウォームアップした最後の candle.open_time (なければ None)。
+        run() がこの時刻以前のバーを iter_closed から受け取った際にスキップするために使う。
+        """
+        if self._warm_bars <= 0 or not hasattr(self._feed, "get_history"):
+            return None
+        import sys
+        from datetime import timedelta
+        now = datetime.now(timezone.utc)
+        # warm_bars 本 × TF 幅 だけ過去に遡る (余裕を持って1.5倍の時間幅)
+        dur = self._tf.duration
+        lookback = timedelta(seconds=dur.total_seconds() * self._warm_bars * 1.5)
+        start = now - lookback
+        try:
+            candles = self._feed.get_history(self._spec, self._tf, start, now)
+        except Exception as e:
+            print(f"[warn] warm-up fetch failed ({e}); starting without warm-up",
+                  file=sys.stderr)
+            return None
+        last_time: "datetime | None" = None
+        for candle in candles:
+            self._provider.on_candle(candle)
+            last_time = candle.open_time
+        print(f"[warm-up] fed {len(candles)} historical bars to provider",
+              file=sys.stderr)
+        return last_time
+
     def run(self, *, stop: threading.Event | None = None,
             max_bars: int | None = None) -> int:
         """確定足を1本ずつ処理する。処理したバー数を返す。
@@ -418,9 +455,14 @@ class LiveRunner:
         リコンサイル (フェーズ8 #6): 起動時に加え、再接続復帰直後 (新規判断の前) と
         一定本数ごとに状態を再同期し「リコンサイル不一致ゼロ」を維持する。
         """
+        warm_until = self._warm_provider()
         self._maybe_reconcile("startup")
         bars = 0
         for candle in self._feed.iter_closed(self._spec, self._tf, stop=stop):
+            # ウォームアップ済み区間のバーが iter_closed から重複流入した場合はスキップ。
+            # (テスト用 FakeFeed や遅延ポーリング時に get_history と iter_closed が重複)
+            if warm_until is not None and candle.open_time <= warm_until:
+                continue
             # 切断から復帰した直後は、新規判断の前に状態を実態へ合わせ直す
             seen = getattr(self._feed, "reconnect_count", 0)
             if seen != self._last_reconnect_seen:
