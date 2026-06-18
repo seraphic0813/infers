@@ -236,6 +236,15 @@ def build_report_data(*, candles: list[Candle], report: BacktestReport,
             exit_time=exit_t,
         ))
 
+    # 同一タイムスタンプ (同一バーで複数トレードが決済) を排除し、最後の累積値を
+    # 採用する。Lightweight Charts の setData は厳密昇順・一意の time を要求するため、
+    # 重複が残ると資産曲線が例外で一切描画されない (⑦ の不具合の根本原因)。
+    if equity_usd:
+        _eq_last: dict[int, str] = {}
+        for _ts, _val in equity_usd:
+            _eq_last[_ts] = _val
+        equity_usd = [[k, _eq_last[k]] for k in sorted(_eq_last)]
+
     total_usd = Decimal(report.total_pnl_tick_steps) * usd_per_ts
     max_dd_usd = Decimal(report.max_drawdown_tick_steps) * usd_per_ts
     swap_ts_total = sum(t.get("swap_ts", 0) for t in recorder.trades)
@@ -338,21 +347,23 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
          font-family: "Segoe UI", Meiryo, sans-serif; font-size: 13px; }
   h1 { font-size: 18px; margin: 0; }
   h2 { font-size: 14px; margin: 0 0 8px; color: #9aa0ab; font-weight: 600; }
-  .wrap { padding: 16px; max-width: 1700px; margin: 0 auto; }
+  .wrap { padding: 16px; max-width: 1900px; margin: 0 auto; }
   header { display: flex; justify-content: space-between; align-items: baseline;
-           margin-bottom: 14px; }
+           margin-bottom: 12px; }
   header .sub { color: #787b86; font-size: 12px; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-           gap: 8px; margin-bottom: 16px; }
-  .card { background: #1e222d; border: 1px solid #2a2e39; border-radius: 6px;
-          padding: 10px 12px; }
-  .card .k { color: #787b86; font-size: 11px; margin-bottom: 4px; }
-  .card .v { font-size: 17px; font-weight: 600; }
+  /* ① バックテスト結果: 横1行のコンパクトな指標バー (溢れたら横スクロール) */
+  .statbar { display: flex; gap: 6px; margin-bottom: 14px; overflow-x: auto;
+             padding-bottom: 4px; }
+  .statbar .card { flex: 0 0 auto; background: #1e222d; border: 1px solid #2a2e39;
+                   border-radius: 5px; padding: 5px 9px; min-width: 96px; }
+  .statbar .card .k { color: #787b86; font-size: 10px; margin-bottom: 2px;
+                      white-space: nowrap; }
+  .statbar .card .v { font-size: 14px; font-weight: 600; white-space: nowrap; }
   .pos { color: #26a69a; } .neg { color: #ef5350; }
   .row2 { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-bottom: 16px; }
   .panel { background: #1e222d; border: 1px solid #2a2e39; border-radius: 6px;
            padding: 12px; }
-  #equity { height: 220px; }
+  #equity { height: 240px; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th, td { padding: 4px 8px; text-align: right; border-bottom: 1px solid #2a2e39;
            white-space: nowrap; }
@@ -360,8 +371,13 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   td:first-child, th:first-child { text-align: left; }
   #monthly td.m { min-width: 56px; }
   .chartbox { margin-bottom: 16px; }
-  #chart { height: 640px; }
-  #rsi { height: 150px; border-top: 1px solid #2a2e39; }
+  /* ② チャートを大きく */
+  #chart { height: 760px; }
+  #rsi { height: 160px; border-top: 1px solid #2a2e39; position: relative; }
+  /* ⑤ RSI 値ツールチップ */
+  .tip { position: absolute; z-index: 6; pointer-events: none; display: none;
+         background: #1e222d; border: 1px solid #4a4f5c; border-radius: 4px;
+         padding: 3px 7px; font-size: 11px; color: #d1d4dc; white-space: nowrap; }
   .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px;
              flex-wrap: wrap; }
   .toolbar button { background: #2a2e39; color: #d1d4dc; border: 1px solid #363a45;
@@ -372,11 +388,20 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   #tf-btns button:first-child { border-radius: 4px 0 0 4px; border-left: 1px solid #363a45; }
   #tf-btns button:last-child { border-radius: 0 4px 4px 0; }
   #tf-btns button.on { background: #2962ff; border-color: #2962ff; color: #fff; }
-  #tradetbl-box { max-height: 240px; overflow: auto; }
+  /* ⑥ フィルタ */
+  .filters { display: flex; gap: 8px; align-items: center; margin-bottom: 8px;
+             flex-wrap: wrap; color: #9aa0ab; font-size: 12px; }
+  .filters select, .filters input { background: #2a2e39; color: #d1d4dc;
+             border: 1px solid #363a45; border-radius: 4px; padding: 3px 6px; }
+  .filters button { background: #2a2e39; color: #d1d4dc; border: 1px solid #363a45;
+             border-radius: 4px; padding: 3px 9px; cursor: pointer; }
+  #tradetbl-box { max-height: 320px; overflow: auto; }
   #tradetbl tbody tr { cursor: pointer; }
   #tradetbl tbody tr:hover { background: #262b38; }
   #tradetbl tbody tr.sel { background: #2d3554; }
-  .grid2 { display: grid; grid-template-columns: 3fr 2fr; gap: 12px; }
+  #tradetbl tfoot td { position: sticky; bottom: 0; background: #20242f;
+             font-weight: 600; border-top: 2px solid #363a45; }
+  .grid2 { display: grid; grid-template-columns: 3fr 2fr; gap: 12px; margin-bottom: 16px; }
   #detail .kv { display: grid; grid-template-columns: 130px 1fr; gap: 2px 10px;
                 font-size: 12px; }
   #detail .kv .k { color: #787b86; }
@@ -395,27 +420,10 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="sub" id="hdr-period"></div>
   </header>
 
-  <!-- ① 上部: トレード一覧 + 詳細 -->
-  <div class="grid2">
-    <div class="panel">
-      <h2>トレード一覧 (行クリックでチャートへ)</h2>
-      <div id="tradetbl-box">
-        <table id="tradetbl">
-          <thead><tr>
-            <th>#</th><th>エントリー日時(UTC)</th><th>方向</th><th>建値</th>
-            <th>退出</th><th>退出種別</th><th>PnL</th><th>R</th>
-            <th>根拠</th><th>conf</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </div>
-    <div class="panel" id="detail"><h2>トレード詳細</h2>
-      <div id="detail-body" style="color:#787b86">トレードを選択してください。</div>
-    </div>
-  </div>
+  <!-- ① バックテスト結果 (横1行コンパクト) -->
+  <div class="statbar" id="cards"></div>
 
-  <!-- ② 中部: チャート -->
+  <!-- ② チャート (大きめ) -->
   <div class="panel chartbox">
     <div class="toolbar">
       <h2 style="margin:0">チャート (<span id="hdr-tf"></span>)</h2>
@@ -440,6 +448,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
       <span><span class="sw" style="background:#42a5f5"></span>ダウ転換決済 (■)</span>
       <span><span class="sw" style="background:#ffb74d"></span>建値SL (●)</span>
       <span><span class="sw" style="background:#ef5350"></span>損切りSL (●)</span>
+      <span><span class="sw" style="background:#26a69a"></span>指値発注 (◇) 〜 失効期限 (◇) ・有効期間=破線</span>
       <span><span class="sw" style="background:#ffd54f"></span>選択トレード (黄=ハイライト, 選択時は他トレード非表示)</span>
       <span><span class="sw" style="background:#d4af37"></span>FIB押し戻し (38.2/50/61.8/78.6)</span>
       <span><span class="sw" style="background:#4dd0e1"></span>SRゾーン (上下端)</span>
@@ -447,12 +456,49 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- ③ 下部: 結果レポート (サマリーカード + 資産曲線 + 月次) -->
-  <div class="cards" id="cards"></div>
+  <!-- ③ トレード一覧 + 詳細 -->
+  <div class="grid2">
+    <div class="panel">
+      <h2>トレード一覧 (行クリックでチャートへ)</h2>
+      <!-- ⑥ フィルタ -->
+      <div class="filters" id="filters">
+        <span>方向</span>
+        <select id="f-dir"><option value="">全</option><option value="1">買</option
+          ><option value="-1">売</option></select>
+        <span>退出</span>
+        <select id="f-exit"><option value="">全</option><option value="TP">半分利確</option
+          ><option value="BE_SL">建値SL</option><option value="SL">損切りSL</option
+          ><option value="FIB">フィボ目標利確</option><option value="DOW">ダウ転換決済</option
+          ><option value="EOD">期末手仕舞い</option><option value="CLOSE">手仕舞い</option></select>
+        <span>勝敗</span>
+        <select id="f-res"><option value="">全</option><option value="win">勝ち</option
+          ><option value="loss">負け</option></select>
+        <span>根拠</span>
+        <input id="f-fam" placeholder="例 DOW / SMA / RSI" style="width:120px">
+        <button id="f-clear">クリア</button>
+      </div>
+      <div id="tradetbl-box">
+        <table id="tradetbl">
+          <thead><tr>
+            <th>#</th><th>エントリー日時(UTC)</th><th>方向</th><th>建値</th>
+            <th>退出</th><th>退出種別</th><th>PnL</th><th>R</th>
+            <th>根拠</th><th>conf</th>
+          </tr></thead>
+          <tbody></tbody>
+          <tfoot id="tfoot"></tfoot>
+        </table>
+      </div>
+    </div>
+    <div class="panel" id="detail"><h2>トレード詳細</h2>
+      <div id="detail-body" style="color:#787b86">トレードを選択してください。</div>
+    </div>
+  </div>
+
+  <!-- ④ 資産曲線 + 月次損益 -->
   <div class="row2">
     <div class="panel"><h2>資産曲線</h2><div id="equity"></div></div>
     <div class="panel"><h2>月次損益</h2>
-      <div style="max-height:220px;overflow:auto"><table id="monthly"></table></div>
+      <div style="max-height:240px;overflow:auto"><table id="monthly"></table></div>
     </div>
   </div>
 </div>
@@ -463,7 +509,7 @@ const BT = window.BT;
 const TICK = parseFloat(BT.summary.tick_size);
 const BAR = BT.bar_seconds;
 const px = v => v * TICK;
-// ④ 円表記: USD建ての *_usd を JPY へ換算して表示 (レートはUIで変更可)
+// 円表記: USD建ての *_usd を JPY へ換算して表示 (レートはUIで変更可)
 let JPY = parseFloat(BT.summary.jpy_rate || "150");
 const yen = usd => Math.round(parseFloat(usd) * JPY);
 const fmtY = usd => (parseFloat(usd) >= 0 ? "+" : "") + "¥" +
@@ -499,16 +545,22 @@ function aggregate(tfSec) {
   return { t, o, h, l, c };
 }
 
-// ---- SMA / Wilder RSI (表示TFの終値列から再計算) ----
-function smaFrom(agg, period) {
-  const out = []; let sum = 0; const cc = agg.c;
+// ---- SMA を全長配列で計算 (バー index で参照できるよう null 埋め, 価格単位) ----
+function smaArray(agg, period) {
+  const cc = agg.c, out = new Array(cc.length).fill(null); let sum = 0;
   for (let i = 0; i < cc.length; i++) {
     sum += cc[i];
     if (i >= period) sum -= cc[i - period];
-    if (i >= period - 1) out.push({ time: agg.t[i], value: px(sum / period) });
+    if (i >= period - 1) out[i] = px(sum / period);
   }
   return out;
 }
+function seriesFromArray(agg, arr) {
+  const o = [];
+  for (let i = 0; i < arr.length; i++) if (arr[i] != null) o.push({ time: agg.t[i], value: arr[i] });
+  return o;
+}
+// ---- Wilder RSI (表示TFの終値列から再計算) ----
 function rsiFrom(agg, period) {
   const out = []; let ag = 0, al = 0; const cc = agg.c;
   for (let i = 1; i < cc.length; i++) {
@@ -521,6 +573,15 @@ function rsiFrom(agg, period) {
     }
   }
   return out;
+}
+// ---- agg.t (昇順バケット) で time 以下の最大バー index を二分探索 ----
+function barIndexAtTime(agg, time) {
+  const t = agg.t; if (!t.length) return 0;
+  if (time <= t[0]) return 0;
+  if (time >= t[t.length - 1]) return t.length - 1;
+  let lo = 0, hi = t.length - 1, ans = 0;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (t[m] <= time) { ans = m; lo = m + 1; } else hi = m - 1; }
+  return ans;
 }
 
 // ---- ヘッダ + 円レート入力 ----
@@ -539,7 +600,7 @@ const net = parseFloat(S.net_profit_usd);
 const eqChart = LightweightCharts.createChart(document.getElementById("equity"), {
   layout: { background: { color: "#1e222d" }, textColor: "#9aa0ab" },
   grid: { vertLines: { color: "#2a2e39" }, horzLines: { color: "#2a2e39" } },
-  timeScale: { timeVisible: false }, height: 220, autoSize: true,
+  timeScale: { timeVisible: false }, height: 240, autoSize: true,
 });
 const eqSeries = eqChart.addAreaSeries({
   lineColor: "#26a69a", topColor: "rgba(38,166,154,.3)",
@@ -569,14 +630,20 @@ function renderMoney() {
   document.getElementById("cards").innerHTML = cards.map(([k, v, cls]) =>
     `<div class="card"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`).join("");
 
-  eqSeries.setData(BT.equity.map(([t, v]) => ({ time: t, value: yen(v) })));
+  // ⑦ 同一タイムスタンプの重複を排除 (LWC は厳密昇順・一意の time を要求。重複が
+  //    残ると setData が例外で資産曲線が一切描画されない)。最後の累積値を採用。
+  const eqMap = new Map();
+  for (const [t, v] of BT.equity) eqMap.set(t, yen(v));
+  const eqData = [...eqMap.entries()].sort((a, b) => a[0] - b[0])
+    .map(([time, value]) => ({ time, value }));
+  eqSeries.setData(eqData);
   if (eqInitLine) eqSeries.removePriceLine(eqInitLine);
   eqInitLine = eqSeries.createPriceLine({ price: yen(S.initial_capital), color: "#787b86",
     lineStyle: LightweightCharts.LineStyle.Dashed, title: "初期資金" });
+  eqChart.timeScale().fitContent();
   renderMonthly();
   if (typeof renderTradeTable === "function") renderTradeTable();
 }
-eqChart.timeScale().fitContent();
 
 // ---- 月次損益表 (年 × 月, 円換算) ----
 function renderMonthly() {
@@ -625,15 +692,17 @@ rsiLine.createPriceLine({ price: 70, color: "#787b86",
 rsiLine.createPriceLine({ price: 30, color: "#787b86",
   lineStyle: LightweightCharts.LineStyle.Dashed, title: "30" });
 
-// ---- 表示TFの適用 (ローソク・SMA・RSI を集約して差し替え) ----
+// ---- 表示TFの状態 (集約・SMA配列をグローバル保持: ズーム/グランビル計算で参照) ----
 let curTF = BAR;
+let curAgg = null, curSma90 = null, curSma200 = null;
 function applyTF(tfSec) {
   curTF = tfSec;
-  const agg = aggregate(tfSec);
+  const agg = aggregate(tfSec); curAgg = agg;
   candleSeries.setData(agg.t.map((tt, i) => ({ time: tt, open: px(agg.o[i]),
     high: px(agg.h[i]), low: px(agg.l[i]), close: px(agg.c[i]) })));
-  sma90Series.setData(smaFrom(agg, 90));
-  sma200Series.setData(smaFrom(agg, 200));
+  curSma90 = smaArray(agg, 90); curSma200 = smaArray(agg, 200);
+  sma90Series.setData(seriesFromArray(agg, curSma90));
+  sma200Series.setData(seriesFromArray(agg, curSma200));
   rsiLine.setData(rsiFrom(agg, 14));
   const lbl = (TF_DEFS.find(d => d[1] === tfSec) || ["?"])[0];
   document.querySelectorAll("#tf-btns button").forEach(b =>
@@ -652,9 +721,28 @@ function syncFrom(src, dst) {
 }
 syncFrom(chart, rsiChart); syncFrom(rsiChart, chart);
 
+// ---- ⑤ RSI ツールチップ (マウスオーバーで RSI 値を表示) ----
+const rsiBox = document.getElementById("rsi");
+const rsiTip = document.createElement("div"); rsiTip.className = "tip"; rsiBox.appendChild(rsiTip);
+rsiChart.subscribeCrosshairMove(param => {
+  if (!param.time || !param.point) { rsiTip.style.display = "none"; return; }
+  const sd = param.seriesData.get(rsiLine);
+  const val = sd == null ? null : (typeof sd === "object" ? sd.value : sd);
+  if (val == null) { rsiTip.style.display = "none"; return; }
+  rsiTip.style.display = "block";
+  rsiTip.innerHTML = `RSI <b>${val.toFixed(2)}</b> <span class="jr">${fmtD(param.time)}</span>`;
+  const w = rsiBox.clientWidth;
+  rsiTip.style.left = Math.min(param.point.x + 14, w - rsiTip.offsetWidth - 6) + "px";
+  rsiTip.style.top = Math.max(4, param.point.y - 28) + "px";
+});
+
 // ---- ② エントリー↔退出 接続線 (選択トレード) ----
 const linkSeries = chart.addLineSeries({ color: "#ffd54f", lineWidth: 2,
   lineStyle: LightweightCharts.LineStyle.Dotted, priceLineVisible: false,
+  lastValueVisible: false, crosshairMarkerVisible: false });
+// ---- ③ 指値の有効期間ライン (発注 → 失効を limit 価格水準で結ぶ破線) ----
+const limitWinSeries = chart.addLineSeries({ color: "#26a69a", lineWidth: 2,
+  lineStyle: LightweightCharts.LineStyle.Dashed, priceLineVisible: false,
   lastValueVisible: false, crosshairMarkerVisible: false });
 
 // ---- 退出種別ごとの色・形・ラベル ----
@@ -669,15 +757,24 @@ const EXIT_META = {
 };
 const EXIT_LABEL = k => (EXIT_META[k] || EXIT_META.SL).label;
 
+// ---- ③ 指値の発注バー時刻 (id の ISO) と失効時刻 (plan.expiry) ----
+function planTimes(t) {
+  const seg = String(t.id).split("/");
+  const iso = seg.slice(2).join("/");
+  const place = Math.floor(Date.parse(iso) / 1000);
+  return { place: Number.isFinite(place) ? place : null, exp: t.plan.expiry || null };
+}
+const snapTF = tm => Math.floor(tm / curTF) * curTF;
+
 // ---- マーカー (全トレードのエントリー/退出 + 選択ハイライト + 未約定任意) ----
 const trades = BT.trades;
 let showUnfilled = false;
-function buildMarkers(selIdx) {
+function buildMarkers(si) {
   const ms = [];
   trades.forEach((t, i) => {
     // 選択時は選択トレードのみ表示 (他は非表示)。未選択時は全件表示。
-    if (selIdx >= 0 && i !== selIdx) return;
-    const sel = i === selIdx;            // ③ 選択トレードは黄色で強調
+    if (si >= 0 && i !== si) return;
+    const sel = i === si;
     for (const [tt, p, v] of t.entries) {
       ms.push({ time: tt, position: t.dir > 0 ? "belowBar" : "aboveBar",
         color: sel ? "#ffd54f" : (t.dir > 0 ? "#26a69a" : "#ef5350"),
@@ -692,6 +789,14 @@ function buildMarkers(selIdx) {
         id: "T" + i, text: `#${i + 1} ${meta.label} ${px(p).toFixed(2)}` });
     });
   });
+  // ③ 選択トレードの指値発注 / 失効期限マーカー
+  if (si >= 0) {
+    const t = trades[si], pt = planTimes(t);
+    if (pt.place) ms.push({ time: snapTF(pt.place), position: "belowBar",
+      color: "#26a69a", shape: "circle", text: `指値発注 ${px(t.plan.limit).toFixed(2)}` });
+    if (pt.exp) ms.push({ time: snapTF(pt.exp), position: "aboveBar",
+      color: "#ff8a65", shape: "circle", text: "指値失効期限" });
+  }
   if (showUnfilled) {
     for (const u of BT.unfilled) {
       const t0 = Date.parse(u.id.split("/").slice(2).join("/")) / 1000;
@@ -709,13 +814,35 @@ document.getElementById("chk-unfilled").addEventListener("change", e => {
   showUnfilled = e.target.checked; buildMarkers(selIdx);
 });
 
-// ---- トレード一覧表 (円換算・再描画可能) ----
+// ---- ⑥ フィルタ ----
+const F = {
+  dir: document.getElementById("f-dir"), exit: document.getElementById("f-exit"),
+  res: document.getElementById("f-res"), fam: document.getElementById("f-fam"),
+};
+function tradeMatches(t) {
+  if (F.dir.value && String(t.dir) !== F.dir.value) return false;
+  if (F.exit.value) {
+    const lastk = (t.exit_kinds && t.exit_kinds.at(-1)) || t.exit_kind;
+    if (lastk !== F.exit.value) return false;
+  }
+  const pnl = parseFloat(t.pnl_usd);
+  if (F.res.value === "win" && !(pnl > 0)) return false;
+  if (F.res.value === "loss" && !(pnl < 0)) return false;
+  const fam = F.fam.value.trim().toUpperCase();
+  if (fam && !String(t.features.families || "").toUpperCase().includes(fam)) return false;
+  return true;
+}
+
+// ---- トレード一覧表 (円換算・フィルタ・合計行) ----
 const tbody = document.querySelector("#tradetbl tbody");
 function renderTradeTable() {
-  tbody.innerHTML = trades.map((t, i) => {
-    const pnl = parseFloat(t.pnl_usd);
+  let rows = "", n = 0, sum = 0, wins = 0, sumR = 0, nR = 0;
+  trades.forEach((t, i) => {
+    if (!tradeMatches(t)) return;
+    n++; const pnl = parseFloat(t.pnl_usd); sum += pnl; if (pnl > 0) wins++;
+    if (t.r_multiple != null) { sumR += parseFloat(t.r_multiple); nR++; }
     const v = t.verdict ?? {};
-    return `<tr data-i="${i}" class="${i === selIdx ? "sel" : ""}"><td>${i + 1}</td>` +
+    rows += `<tr data-i="${i}" class="${i === selIdx ? "sel" : ""}"><td>${i + 1}</td>` +
       `<td>${t.entry_time ? fmtD(t.entry_time) : "-"}</td>` +
       `<td>${t.dir > 0 ? "買" : "売"}</td>` +
       `<td>${px(t.entries[0]?.[1] ?? 0).toFixed(2)}</td>` +
@@ -725,7 +852,42 @@ function renderTradeTable() {
       `<td>${t.r_multiple ?? "-"}</td>` +
       `<td style="text-align:left">${t.features.families}</td>` +
       `<td>${v.confidence ?? "-"}</td></tr>`;
-  }).join("");
+  });
+  tbody.innerHTML = rows;
+  // フィルタ結果の合計 (件数 / 勝率 / 平均R / PnL合計)
+  const wr = n ? (wins / n * 100).toFixed(1) : "0.0";
+  const ar = nR ? (sumR / nR).toFixed(2) : "-";
+  document.getElementById("tfoot").innerHTML =
+    `<tr><td colspan="6">フィルタ結果 ${n} / ${trades.length} 件 ・ 勝率 ${wr}% ・ 平均R ${ar}</td>` +
+    `<td class="${sum >= 0 ? "pos" : "neg"}">${fmtY(sum)}</td><td colspan="3"></td></tr>`;
+}
+[F.dir, F.exit, F.res].forEach(el => el.addEventListener("change", renderTradeTable));
+F.fam.addEventListener("input", renderTradeTable);
+document.getElementById("f-clear").onclick = () => {
+  F.dir.value = ""; F.exit.value = ""; F.res.value = ""; F.fam.value = ""; renderTradeTable();
+};
+
+// ---- ④ グランビル近似分類 (チャート足の price/SMA/傾きから推定) ----
+function granvilleClassify(dir, price, sma, slopeUp) {
+  const above = price > sma;
+  if (dir > 0) { // 買い ①〜④
+    if (slopeUp && above) return { no: "買①", label: "SMA上向き×価格が上抜け (順張り初動)" };
+    if (slopeUp && !above) return { no: "買②", label: "SMA上向き×価格が一時SMA割れ (押し目)" };
+    if (!slopeUp && above) return { no: "買③", label: "SMA横ばい/失速×SMA上で浅い押し (反発)" };
+    return { no: "買④", label: "SMA下向き×下方への大きな乖離 (自律反発狙い)" };
+  } else { // 売り ⑤〜⑧
+    if (!slopeUp && !above) return { no: "売⑤", label: "SMA下向き×価格が下抜け (順張り初動)" };
+    if (!slopeUp && above) return { no: "売⑥", label: "SMA下向き×価格が一時SMA超え (戻り売り)" };
+    if (slopeUp && !above) return { no: "売⑦", label: "SMA横ばい/失速×SMA下で浅い戻り (反落)" };
+    return { no: "売⑧", label: "SMA上向き×上方への大きな乖離 (自律反落狙い)" };
+  }
+}
+// family 短縮名 → 説明 (詳細パネルの可読性向上)
+const FAM_DESC = { DOW: "ダウ順行", GRANVILLE: "グランビル", SMA: "SMAグランビル",
+  RSI: "RSIマルチTF", SR: "水平レジサポ", FIB: "フィボ押し戻し", ELLIOTT: "エリオット第2波" };
+function famPretty(fams) {
+  return String(fams || "").split(",").filter(Boolean)
+    .map(f => `${f}${FAM_DESC[f] ? `(${FAM_DESC[f]})` : ""}`).join(" + ");
 }
 
 // ---- トレード選択 (チャートズーム + 根拠ライン + 接続線 + ハイライト + 詳細) ----
@@ -744,23 +906,33 @@ function select(i) {
     r.classList.toggle("sel", parseInt(r.dataset.i) === i));
   document.getElementById("sel-label").textContent =
     `選択中: #${i + 1} (${t.id})  PnL ${fmtY(t.pnl_usd)}`;
-  // ③ ハイライト: 選択トレードのマーカーを黄色に
   buildMarkers(i);
-  // ② エントリー↔退出を点線で接続 (最初のエントリー → 最後の退出)
-  if (t.entry_time && t.exit_time) {
+  // エントリー↔退出を点線で接続 (最初のエントリー → 最後の退出)。
+  // 同一足で約定・決済した場合 (entry_time === exit_time) は2点が同時刻になり
+  // LWC が例外を投げ、チャートが壊れるため、退出が後の場合のみ描画する。
+  if (t.entry_time && t.exit_time && t.exit_time > t.entry_time) {
     const ep = px(t.entries[0][1]), xp = px(t.exits.at(-1)[1]);
     linkSeries.setData([{ time: t.entry_time, value: ep },
                         { time: t.exit_time, value: xp }]);
   } else { linkSeries.setData([]); }
-  // ズーム: エントリー前 120本 〜 退出後 40本 (長期保有でも収まるよう上限あり)
-  const span = (t.exit_time ?? t.entry_time) - (t.entry_time ?? t.exit_time);
-  const pad = Math.min(120 * BAR, Math.max(20 * BAR, span * 0.1));
-  const from = (t.entry_time ?? t.exit_time) - pad;
-  const to = (t.exit_time ?? t.entry_time) + pad;
-  chart.timeScale().setVisibleRange({ from, to });
+  // ③ 指値の有効期間ライン (発注バー → 失効) を limit 価格で結ぶ
+  const p = t.plan;
+  const pt = planTimes(t);
+  if (pt.place && pt.exp) {
+    let a = snapTF(pt.place), b = snapTF(pt.exp); if (b <= a) b = a + curTF;
+    limitWinSeries.setData([{ time: a, value: px(p.limit) }, { time: b, value: px(p.limit) }]);
+  } else { limitWinSeries.setData([]); }
+  // ② ズーム: エントリーを中心にバー数ベースで合わせる (TFに依らず一定の見やすさ)
+  const eI = barIndexAtTime(curAgg, t.entry_time ?? t.exit_time);
+  const xI = barIndexAtTime(curAgg, t.exit_time ?? t.entry_time);
+  const tradeBars = Math.max(1, xI - eI);
+  let win = Math.min(220, Math.max(60, tradeBars + 40));
+  let center = eI;
+  // 退出が窓に収まらない長期保有は中点中心に広げる (両端が見えるように)
+  if (xI - eI > win * 0.6) { win = Math.min(280, Math.max(win, (xI - eI) + 30)); center = Math.round((eI + xI) / 2); }
+  chart.timeScale().setVisibleLogicalRange({ from: center - win / 2, to: center + win / 2 });
   // 根拠ライン
   clearLines();
-  const p = t.plan;
   addLine(p.limit, "#26a69a", "指値(合流点)");
   addLine(p.sl, "#ef5350", "SL初期", LightweightCharts.LineStyle.Solid);
   addLine(p.invalidation, "#ff6d00", "エリオット無効化");
@@ -774,17 +946,29 @@ function select(i) {
     addLine(lo, "#4dd0e1", "SR" + (k + 1) + "下端", LightweightCharts.LineStyle.Dashed);
     addLine(hi, "#4dd0e1", "SR" + (k + 1) + "上端", LightweightCharts.LineStyle.Dashed);
   });
-  // SMA90/200 は常時表示 (青/橙の折れ線)。選択TFの足で再計算済み。
   // 詳細パネル
   const v = t.verdict ?? {};
   const f = t.features;
-  // 手法検証用の派生値 (押し目深さ / 半分利確トリガー / 方向)
   const dir = t.dir;
   const swHi = Math.max(p.w1_high, p.w1_low), swLo = Math.min(p.w1_high, p.w1_low);
   const swSpan = swHi - swLo;
   const depth = swSpan > 0 ? (dir > 0 ? (p.limit - swLo) : (swHi - p.limit)) / swSpan : 0;
   const depthOk = depth <= 0.40 ? "✓深い(40%以内)" : "△浅い(40%超)";
   const halfTrig = (t.journal.find(([n]) => n === "HALF_TAKE_PROFIT") || [null, {}])[1].trigger || "—";
+  // ④ グランビル近似 + SMA乖離% (エントリー足のチャートSMAから算出)
+  const eI2 = barIndexAtTime(curAgg, t.entry_time ?? t.exit_time);
+  const sma90v = curSma90[eI2], sma200v = curSma200[eI2];
+  const pricev = px(t.entries[0]?.[1] ?? curAgg.c[eI2]);
+  let gv = null, dev90 = null, dev200 = null;
+  if (sma90v != null) {
+    const k = Math.max(1, Math.min(3, eI2));
+    const slopeUp = sma90v - (curSma90[eI2 - k] ?? sma90v) >= 0;
+    gv = granvilleClassify(dir, pricev, sma90v, slopeUp);
+    dev90 = (pricev - sma90v) / sma90v * 100;
+  }
+  if (sma200v != null) dev200 = (pricev - sma200v) / sma200v * 100;
+  const devTxt = `SMA90 ${dev90 != null ? (dev90 >= 0 ? "+" : "") + dev90.toFixed(2) + "%" : "—"}` +
+    ` / SMA200 ${dev200 != null ? (dev200 >= 0 ? "+" : "") + dev200.toFixed(2) + "%" : "—"}`;
   const journey = t.journal.map(([n, pl]) => {
     const ps = Object.entries(pl).filter(([k]) => k !== "state")
       .map(([k, x]) => `${k}=${x}`).join(", ");
@@ -801,13 +985,19 @@ function select(i) {
       <div class="k">判定理由</div><div><ul>${(v.reasons ?? []).map(r => `<li>${r}</li>`).join("")}</ul></div>
       <div class="k">方向 / マクロ</div><div>${dir > 0 ? "買い" : "売り"} (ダウ ${f.dow_state}) /
         マクロダウ ${f.macro_dow ?? "-"} / 第2波TF ${f.wave2_tf ?? "M5"}</div>
-      <div class="k">コンフルエンス</div><div>${f.families} (cluster_score=${f.cluster_score})</div>
+      <div class="k">グランビル(近似)</div><div>${gv ? `<b>${gv.no}</b> ${gv.label}` : "—"}
+        <span class="jr">(SMA90基準・チャート足から推定)</span></div>
+      <div class="k">SMA乖離</div><div>${devTxt} <span class="jr">(エントリー足)</span></div>
+      <div class="k">コンフルエンス</div><div>${famPretty(f.families)}
+        <span class="jr">(cluster_score=${f.cluster_score})</span></div>
       <div class="k">根拠強度</div><div>ダウ ${f.dow_strength ?? "-"} / RSI ${f.rsi_strength ?? "-"}
         (上位足 順${f.rsi_mtf_aligned ?? "-"}/逆${f.rsi_mtf_conflict ?? "-"}) /
         SMA ${f.sma_strength ?? "-"} / SR ${f.sr_strength ?? "-"}</div>
       <div class="k">押し目/戻り深さ</div><div>${(depth * 100).toFixed(1)}% (基準=直近スイング高安) ${depthOk}</div>
       <div class="k">半分利確トリガー</div><div>${halfTrig} (RSI / SMA90 / SR のいずれか)</div>
       <div class="k">rsi / band</div><div>現在 ${f.rsi} → 到達予測 ${f.rsi_band} (eta ${f.eta_bars} 本)</div>
+      <div class="k">指値の有効期限</div><div>発注 ${pt.place ? fmtD(snapTF(pt.place)) : "-"}
+        → 失効 ${pt.exp ? fmtD(pt.exp) : "-"}</div>
       <div class="k">ambiguity</div><div>${f.ambiguity}</div>
       <div class="k">価格構造</div><div>limit ${px(t.plan.limit).toFixed(2)} /
         無効化 ${px(t.plan.invalidation).toFixed(2)} / W1 ${px(t.plan.w1_high).toFixed(2)} /
@@ -818,13 +1008,12 @@ function select(i) {
 tbody.addEventListener("click", e => {
   const tr = e.target.closest("tr"); if (tr) select(parseInt(tr.dataset.i));
 });
-chart.subscribeCrosshairMove(() => {});
 document.getElementById("btn-prev").onclick = () => select(Math.max(0, selIdx - 1));
 document.getElementById("btn-next").onclick = () =>
   select(Math.min(trades.length - 1, selIdx + 1));
 document.getElementById("btn-fit").onclick = () => chart.timeScale().fitContent();
 
-// 上位TF切替: 現在の表示時間範囲を保ったままローソク/SMA/RSIを差し替え
+// 上位TF切替: 選択中はトレードに再フォーカス、未選択は表示範囲を維持
 document.querySelectorAll("#tf-btns button").forEach(btn => {
   btn.onclick = () => {
     const vr = chart.timeScale().getVisibleRange();
@@ -841,7 +1030,7 @@ chart.subscribeClick(param => {
   }
 });
 
-// ④ 円レート変更 → 全金額を再描画
+// 円レート変更 → 全金額を再描画
 document.getElementById("jpy").addEventListener("input", e => {
   const r = parseFloat(e.target.value);
   if (Number.isFinite(r) && r > 0) { JPY = r; renderMoney(); }
