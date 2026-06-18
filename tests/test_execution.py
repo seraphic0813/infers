@@ -109,6 +109,45 @@ def test_sl_never_retreats_long(ops):
 
 
 @pytest.mark.property
+@settings(max_examples=200, deadline=None)
+@given(st.lists(
+    st.tuples(st.sampled_from(["HL", "LH", "MOVE"]),
+              st.integers(min_value=900, max_value=1300)),
+    min_size=1, max_size=40,
+))
+def test_sl_never_retreats_after_add_from_sl_at_be(ops):
+    """経路B (PROBE→SL_AT_BE→ADD) 後の任意操作列でもSL単調性が保たれる。"""
+    broker = SimBroker(spread_ticks=2, min_stop_distance_ticks=0)
+    fsm = make_filled_long(broker)
+    # SL_AT_BE へ遷移
+    fsm.on_structure_event(structure_event(StructureEventType.HL, 1005))
+    assert fsm.state is PosState.SL_AT_BE
+    # SL_AT_BE から追撃
+    bar_add = mk_candle(5, 1045, 1025, 1041)
+    broker.process_bar(bar_add)
+    assert fsm.on_wave1_break(bar_add, 1020, add_volume_steps=2)
+    assert fsm.state is PosState.ADD
+
+    prev_sl = fsm.sl_int
+    assert prev_sl is not None
+    for i, (op, price) in enumerate(ops):
+        if op == "HL":
+            fsm.on_structure_event(structure_event(StructureEventType.HL, price, i))
+        elif op == "LH":
+            fsm.on_structure_event(structure_event(StructureEventType.LH, price, i))
+        else:
+            try:
+                fsm.move_sl(price)
+            except SlMonotonicityError:
+                pass
+        if fsm.state is PosState.CLOSED:
+            break
+        # ★ 不変条件: SLは利益方向 (上) にしか動かない
+        assert fsm.sl_int >= prev_sl
+        prev_sl = fsm.sl_int
+
+
+@pytest.mark.property
 @settings(max_examples=100, deadline=None)
 @given(st.integers(min_value=0, max_value=10_000))
 def test_move_sl_downward_always_rejected(delta):
@@ -393,6 +432,74 @@ class TestLifecycle:
             fsm.on_probe_fill(990, 2)            # IDLE では約定通知を受けられない
         with pytest.raises(TransitionError):
             fsm.on_wave1_break(mk_candle(1, 1050, 1000, 1040), 1020, add_volume_steps=2)
+
+    def test_add_from_sl_at_be_path(self):
+        """経路B: PROBE → SL_AT_BE → ADD → SL_AT_BE の追撃 (手法の心理的優位性)。
+
+        建値SL移動 (HL確定) 後、さらに価格が第1波高値を突破した場合に
+        SL_AT_BE 状態から追撃が発動し、新しい平均建値を基準に SL が再設定される。
+        """
+        broker = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        fsm = make_filled_long(broker)           # PROBE: entry=990, sl=960, vol=2
+
+        # HL確定で PROBE → SL_AT_BE (1005 >= 990+min_be=10 → OK)
+        assert fsm.on_structure_event(structure_event(StructureEventType.HL, 1005))
+        assert fsm.state is PosState.SL_AT_BE
+        assert fsm.sl_int == 992                 # 990 + be_offset=2
+
+        # W1(=1020)+buffer(=10)=1030 を超える足 → SL_AT_BE から追撃発動
+        bar = mk_candle(5, 1045, 1025, 1041)     # 終値1041 > 1030
+        broker.process_bar(bar)
+        assert fsm.on_wave1_break(bar, 1020, add_volume_steps=2)
+        assert fsm.state is PosState.ADD
+        assert fsm.volume_steps == 4
+        # 追撃約定 = 1041+spread2=1043, avg = (990×2+1043×2)/4 = 4066/4 = 1016.5 → 1016
+        assert fsm.entry_price_int == 1016
+
+        # 次のHL確定で ADD → SL_AT_BE。SLは新しい平均建値ベースへ更新
+        # 1030 >= 1016 + min_be=10 → OK。既存SL=992 < new_sl=1018 → 単調性 ✓
+        assert fsm.on_structure_event(structure_event(StructureEventType.HL, 1030))
+        assert fsm.state is PosState.SL_AT_BE
+        assert fsm.sl_int == 1018                # 平均建値1016 + be_offset=2
+
+        # さらに W1ブレイク条件が続いても追撃は起きない (_add_fired=True)
+        bar2 = mk_candle(6, 1055, 1030, 1052)
+        broker.process_bar(bar2)
+        assert not fsm.on_wave1_break(bar2, 1020, add_volume_steps=2)
+        assert fsm.volume_steps == 4
+
+        # 半分利確: RSI>=70 → RUNNER
+        bar3 = mk_candle(7, 1080, 1045, 1075)
+        broker.process_bar(bar3)
+        assert fsm.on_half_tp_signal(bar3, Decimal(72))
+        assert fsm.state is PosState.RUNNER
+        assert fsm.volume_steps == 2
+
+        # ジャーナル: 経路B の全遷移が記録されている
+        names = [t for t, _ in fsm.journal]
+        assert names == ["PLACE_PROBE", "PROBE_FILL",
+                         "MOVE_SL", "SL_TO_BREAKEVEN",     # 1st HL → SL_AT_BE
+                         "ADD_FILL",                        # W1ブレイク → ADD
+                         "MOVE_SL", "SL_TO_BREAKEVEN",     # 2nd HL → SL_AT_BE
+                         "HALF_TAKE_PROFIT"]
+
+    def test_add_not_fired_twice_via_probe_then_sl_at_be(self):
+        """経路A経由後に SL_AT_BE へ戻っても追撃は2回目を発動しない。"""
+        broker = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        fsm = make_filled_long(broker)
+        # 経路A: PROBE → ADD
+        bar3 = mk_candle(3, 1035, 1015, 1031)
+        broker.process_bar(bar3)
+        assert fsm.on_wave1_break(bar3, 1020, add_volume_steps=2)
+        assert fsm.state is PosState.ADD
+        # ADD → SL_AT_BE
+        fsm.on_structure_event(structure_event(StructureEventType.HL, 1025))
+        assert fsm.state is PosState.SL_AT_BE
+        # SL_AT_BE で再度 W1ブレイク条件 → 2回目は発動しない
+        bar4 = mk_candle(4, 1060, 1035, 1055)
+        broker.process_bar(bar4)
+        assert not fsm.on_wave1_break(bar4, 1020, add_volume_steps=2)
+        assert fsm.volume_steps == 4             # 変化なし (ADD済みの4のまま)
 
 
 # ---------------------------------------------------------------------------

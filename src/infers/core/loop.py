@@ -146,7 +146,7 @@ class TradingLoop:
                     self._expiry_sink(pid)
             for sev in output.structure_events:
                 fsm.on_structure_event(sev)
-            if fsm.state is PosState.PROBE:
+            if fsm.state in (PosState.PROBE, PosState.SL_AT_BE):
                 fsm.on_wave1_break(candle, plan.w1_high_int,
                                    add_volume_steps=plan.add_volume_steps)
             if fsm.state is PosState.SL_AT_BE:

@@ -3,8 +3,13 @@
 状態は Enum 一本の有限状態機械で管理する (boolフラグの組合せ禁止)。
 
   IDLE → PROBE_PENDING → PROBE → ADD → SL_AT_BE → RUNNER → CLOSED
-            │(失効/無効化)                                ▲
-            └────────────────▶ CLOSED ◀──(SLヒット)───────┘
+            │(失効/無効化)    ↑         ↑                   ▲
+            └─────────────── CLOSED ◀──(SLヒット) ──────────┘
+
+  追撃 (ADD) の2経路:
+    (A) PROBE → ADD → SL_AT_BE   (HL確定前にW1ブレイク)
+    (B) PROBE → SL_AT_BE → ADD → SL_AT_BE  (HL確定後にW1ブレイク: 手法の心理的優位性)
+  どちらの経路も ADD は高々1回 (_add_fired フラグで保証)。
 
 絶対防衛の設計 (CLAUDE.md 第1・3・4条):
   - 本モジュールは LLM に一切依存しない (import すら持たない)
@@ -102,6 +107,7 @@ class PositionFSM:
         self._expiry: datetime | None = None
         self._invalidation_price: int | None = None
         self._limit_order_id: str | None = None
+        self._add_fired: bool = False                  # 追撃は1ポジションにつき高々1回
         self.journal: list[tuple[str, dict]] = []
 
     # -- 参照 ------------------------------------------------------------------
@@ -218,13 +224,22 @@ class PositionFSM:
 
         ヒゲのティック抜けでは発火しない (設計書 §6.2)。発火した場合 True。
 
-        追撃約定後は建値 (`_entry_price_int`) を打診玉と追撃玉の数量加重平均へ
-        更新する。これにより後続の建値SL (§6.3) はポジション全体の損益分岐を
-        基準に置かれ、追撃玉だけが大幅マイナスで切られる事故 (P7) を防ぐ。
-        追撃は必ず第1波高値超え = 打診建値より利益方向で約定するため、平均建値も
-        必ず利益方向へ動き、建値SLの単調性 (CLAUDE.md 第3条) は保たれる。
+        呼び出し可能状態: PROBE または SL_AT_BE。
+          - PROBE: W1ブレイクが建値SL移動 (HL確定) より先に到達した経路
+          - SL_AT_BE: HL確定後にさらに価格が伸びてW1を突破した経路
+            (手法の「心理的優位性」: 建値でリスクゼロになった後に追撃できる)
+
+        追撃は1ポジションにつき高々1回 (_add_fired フラグで保証)。
+        SL_AT_BE → ADD 遷移後は on_structure_event (ADD → SL_AT_BE) が
+        新しい平均建値を基準にSLを再設定する。
+
+        追撃約定後は建値 (`_entry_price_int`) を数量加重平均へ更新する。
+        これにより建値SLはポジション全体の損益分岐を基準に置かれ、
+        追撃玉だけが大幅マイナスで切られる事故 (P7) を防ぐ。
         """
-        self._require(PosState.PROBE)
+        self._require(PosState.PROBE, PosState.SL_AT_BE)
+        if self._add_fired:
+            return False  # 追撃は高々1回 (SL_AT_BE→ADD→SL_AT_BE で再度呼ばれる場合の防護)
         self._require_closed_bar(candle)
         threshold = w1_extreme_int + self.direction * self._cfg.breakout_buffer_ticks
         if self._profit_side(candle.c_int, threshold) <= 0:
@@ -241,6 +256,7 @@ class PositionFSM:
             (Decimal(prev_entry * prev_vol + add_fill * add_volume_steps)
              / Decimal(total_vol)).to_integral_value(rounding=ROUND_HALF_EVEN))
         self._volume_steps = total_vol
+        self._add_fired = True
         self._state = PosState.ADD
         self._log("ADD_FILL", close=candle.c_int, threshold=threshold,
                   add_volume=add_volume_steps, add_fill=add_fill,
