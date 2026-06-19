@@ -100,6 +100,9 @@ def build_provider(args: argparse.Namespace) -> SignalProvider:
     """
     if args.provider:
         return load_provider(args.provider)
+    if args.strategy:
+        from infers.strategies.registry import get_strategy
+        return get_strategy(args.strategy).build(symbol=args.symbol, tf=Timeframe(args.tf))
     from infers.strategies.narrow_focus.provider import InfersSignalProvider, ProviderConfig
     rsi_mtfs = (() if args.no_rsi_mtf
                 else tuple(Timeframe(t) for t in args.rsi_mtf))
@@ -143,6 +146,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--provider",
                    help="SignalProvider factory ('module:attr')。"
                         "省略時は InfersSignalProvider (フルパイプライン)")
+    p.add_argument("--strategy",
+                   help="手法レジストリ(infers.strategies.registry)から名前で選択 "
+                        "(例: 'depth50' = v1.0確定ベースライン)。指定時は他の手法系"
+                        "フラグ(--depth-max 等)を無視し、レジストリ登録済みの構成を"
+                        "そのまま使う。省略時は従来のフラグ組み立て経路(挙動不変)")
     p.add_argument("--verdict-cache", default="work/cache/verdicts.sqlite3")
     p.add_argument("--ai-client", choices=["rule", "claude"], default="rule",
                    help="エントリーゲートの判定方式。既定は rule_judge.py の"
