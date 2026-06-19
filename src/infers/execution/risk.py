@@ -12,7 +12,42 @@ AIがどれだけ強いシグナルを出しても、ここで拒否された注
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
+from decimal import Decimal
+
+
+@dataclass(frozen=True)
+class VolumeSizerConfig:
+    """可変ロットサイジングの設定。すべての金額はアカウント通貨建て。"""
+
+    risk_pct: Decimal               # 1トレードの最大リスク比率 (例: Decimal("0.01") = 1%)
+    tick_value_per_step: Decimal    # 1tick × 1step の損益 (アカウント通貨建て)
+    min_volume_steps: int = 2       # 最低保証ロットステップ (FSMの半分利確が2step以上を要求)
+    max_volume_steps: int = 100     # 上限クリップ (RiskConfig.max_position_volume_steps と揃える)
+
+
+class VolumeSizer:
+    """残高ベースの可変ロット計算。
+
+    equity × risk_pct を SL距離で割り、リスク額を超えない最大ステップ数を返す。
+    """
+
+    def __init__(self, config: VolumeSizerConfig) -> None:
+        self._cfg = config
+
+    def calc_volume_steps(self, equity: Decimal, sl_distance_ticks: int) -> int:
+        """equity (アカウント通貨) と SL距離から発注ステップ数を返す。
+
+        equity <= 0 または sl_distance_ticks <= 0 の場合は min_volume_steps を返す。
+        """
+        if sl_distance_ticks <= 0 or equity <= 0:
+            return self._cfg.min_volume_steps
+        risk = equity * self._cfg.risk_pct
+        cost_per_step = self._cfg.tick_value_per_step * sl_distance_ticks
+        steps = int(risk / cost_per_step)   # floor (切り捨てでリスクを守る)
+        return max(self._cfg.min_volume_steps,
+                   min(steps, self._cfg.max_volume_steps))
 
 
 @dataclass(frozen=True)

@@ -127,10 +127,15 @@ class MT5LiveBroker:
     """
 
     def __init__(self, spec: SymbolSpec, *, magic: int = 26001,
-                 deviation_points: int = 20) -> None:
+                 deviation_points: int = 20,
+                 filling_mode: int | None = None) -> None:
         self.spec = spec
         self.magic = magic
         self.deviation = deviation_points
+        # ブローカー毎のフィリング方式。None = mt5.ORDER_FILLING_FOK (デフォルト)。
+        # Vantage 等 IOC 専用の場合は mt5.ORDER_FILLING_IOC を渡す。
+        # connect() 後に _autodetect_filling() で自動設定される。
+        self._filling_mode: int | None = filling_mode
         self._mt5: Any | None = None
         self._seen: set[str] = set()
         self._tickets: dict[str, int] = {}          # client_order_id → ticket
@@ -147,6 +152,27 @@ class MT5LiveBroker:
         if not mt5.initialize():
             raise FeedError(f"mt5.initialize failed: {mt5.last_error()}")
         self._mt5 = mt5
+        self._autodetect_filling()
+
+    def _autodetect_filling(self) -> None:
+        """シンボルがサポートするフィリング方式を自動検出して設定する。
+
+        filling_mode ビットマスク: FOK=1 / IOC=2 / BOC=4。
+        FOK優先、次いでIOC。どちらも未対応なら RETURN (=0) を使う。
+        """
+        if self._filling_mode is not None:
+            return
+        mt5 = self._require()
+        info = mt5.symbol_info(self.spec.name)
+        if info is None:
+            return
+        fm = info.filling_mode
+        if fm & 1:
+            self._filling_mode = mt5.ORDER_FILLING_FOK
+        elif fm & 2:
+            self._filling_mode = mt5.ORDER_FILLING_IOC
+        else:
+            self._filling_mode = mt5.ORDER_FILLING_RETURN
 
     def _require(self) -> Any:
         if self._mt5 is None:
@@ -176,7 +202,7 @@ class MT5LiveBroker:
         if client_order_id in self._seen:
             return
         mt5 = self._require()
-        result = self._send({
+        req: dict = {
             "action": mt5.TRADE_ACTION_PENDING,
             "symbol": self.spec.name,
             "volume": self._lots(volume_steps),
@@ -187,7 +213,10 @@ class MT5LiveBroker:
             "magic": self.magic,
             "comment": client_order_id,             # 冪等キーをブローカー側にも残す
             "type_time": mt5.ORDER_TIME_GTC,
-        })
+        }
+        if self._filling_mode is not None:
+            req["type_filling"] = self._filling_mode
+        result = self._send(req)
         self._seen.add(client_order_id)
         self._tickets[client_order_id] = result.order
 
@@ -196,7 +225,7 @@ class MT5LiveBroker:
         if client_order_id in self._seen:
             return 0
         mt5 = self._require()
-        result = self._send({
+        req: dict = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": self.spec.name,
             "volume": self._lots(volume_steps),
@@ -205,7 +234,10 @@ class MT5LiveBroker:
             "deviation": self.deviation,
             "magic": self.magic,
             "comment": client_order_id,
-        })
+        }
+        if self._filling_mode is not None:
+            req["type_filling"] = self._filling_mode
+        result = self._send(req)
         self._seen.add(client_order_id)
         self._position_tickets.setdefault(position_id, result.order)
         return self.spec.float_to_ticks(result.price)
@@ -234,7 +266,7 @@ class MT5LiveBroker:
         if pos is None:
             raise FeedError(f"position ticket {ticket} not found at broker")
         opposite = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
-        result = self._send({
+        req = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": self.spec.name,
             "volume": self._lots(volume_steps),
@@ -243,7 +275,10 @@ class MT5LiveBroker:
             "deviation": self.deviation,
             "magic": self.magic,
             "comment": client_order_id,
-        })
+        }
+        if self._filling_mode is not None:
+            req["type_filling"] = self._filling_mode
+        result = self._send(req)
         self._seen.add(client_order_id)
         return self.spec.float_to_ticks(result.price)
 
@@ -285,6 +320,34 @@ class MT5LiveBroker:
                 pending.add(pid)
                 self._tickets.setdefault(order.comment, order.ticket)
         return BrokerSnapshot(positions=positions, pending=frozenset(pending))
+
+    def equity(self) -> "Decimal":
+        """口座残高 (equity) をアカウント通貨建てで返す (EquityProvider 実装)。
+
+        MT5 の account_info().equity はアカウント通貨建てのため、
+        VolumeSizerConfig.tick_value_per_step も同通貨で設定すること。
+        float→Decimal 変換はここのみ (CLAUDE.md 第6条: float は API 境界のみ)。
+        """
+        from decimal import Decimal
+        mt5 = self._require()
+        info = mt5.account_info()
+        if info is None:
+            raise FeedError("account_info() failed")
+        return Decimal(str(info.equity))
+
+    def tick_value_per_step(self, symbol: str) -> "Decimal":
+        """1tick × 1step の損益をアカウント通貨建てで返す (VolumeSizer 設定用)。
+
+        MT5 の trade_tick_value はアカウント通貨建て / 1.0 ロット。
+        lot_step を掛けて 1 step 当たりに変換する。
+        """
+        from decimal import Decimal
+        mt5 = self._require()
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            raise FeedError(f"symbol_info({symbol!r}) failed")
+        tick_value_per_lot = Decimal(str(info.trade_tick_value))
+        return tick_value_per_lot * self.spec.lot_step
 
     def poll_events(self) -> list[BrokerEvent]:
         """前回ポーリング以降の約定 (指値FILL / SLヒット) をイベント化する。
@@ -356,6 +419,7 @@ class LiveRunner:
         journal=None,                             # JournalSink (ライブのみ)
         reconcile_every_bars: int = 12,           # 定期リコンサイル間隔 (0=無効。M5で12=1時間)
         warm_bars: int = 0,                       # 起動前にプロバイダーへ食わせる歴史バー数 (0=無効)
+        volume_sizer=None,                        # VolumeSizer | None
     ) -> None:
         self._feed = feed
         self._spec = spec
@@ -366,10 +430,14 @@ class LiveRunner:
         self._event_source = event_source or (lambda _c: broker.poll_events())
         self._spread_fn = spread_fn or broker.current_spread_ticks
         self._journal = journal
+        # ライブ EquityProvider: MT5LiveBroker が equity() を実装しているので直接注入。
+        equity_prov = broker if volume_sizer is not None else None
         self.loop = TradingLoop(broker=broker, gateway=gateway,
                                 risk=risk, fsm_config=fsm_config, journal=journal,
                                 expiry_sink=getattr(provider, "notify_probe_expired",
-                                                    None))
+                                                    None),
+                                volume_sizer=volume_sizer,
+                                equity_provider=equity_prov)
         # リコンサイルの継続実行 (フェーズ8 #6): 起動時に加え、稼働中も
         # (a) 定期 (reconcile_every_bars 本ごと) と (b) フィード再接続復帰直後に
         # 状態を再同期する。再接続検知はフィードの reconnect_count 増分で行う。

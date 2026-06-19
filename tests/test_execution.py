@@ -606,3 +606,68 @@ class TestRiskManager:
         with pytest.raises(ValueError):
             RiskConfig(max_position_volume_steps=0, max_total_volume_steps=6,
                        max_spread_ticks=10, daily_loss_limit_tick_steps=1000)
+
+
+# ---------------------------------------------------------------------------
+# VolumeSizer — 可変ロットサイジング
+# ---------------------------------------------------------------------------
+
+class TestVolumeSizer:
+    from infers.execution.risk import VolumeSizer, VolumeSizerConfig
+
+    TICK_VALUE = Decimal("0.01")  # XAUUSD: 0.01 USD/tick/step
+
+    def _sizer(self, risk_pct="0.01", min_steps=2, max_steps=100):
+        from infers.execution.risk import VolumeSizer, VolumeSizerConfig
+        return VolumeSizer(VolumeSizerConfig(
+            risk_pct=Decimal(risk_pct),
+            tick_value_per_step=self.TICK_VALUE,
+            min_volume_steps=min_steps,
+            max_volume_steps=max_steps,
+        ))
+
+    def test_basic_sizing(self):
+        """equity=$10000, risk=1%, SL=300tick($3.00) → 33 steps (=0.33lot)"""
+        sizer = self._sizer()
+        steps = sizer.calc_volume_steps(Decimal("10000"), sl_distance_ticks=300)
+        # floor(10000 × 0.01 / (300 × 0.01)) = floor(100 / 3) = 33
+        assert steps == 33
+
+    def test_equity_doubles_steps_double(self):
+        """残高が2倍になればロットも2倍になる (比例性)。"""
+        sizer = self._sizer()
+        # SL=500tick → s1=floor(100/5)=20, s2=floor(200/5)=40 (max=100に当たらない)
+        s1 = sizer.calc_volume_steps(Decimal("10000"), sl_distance_ticks=500)
+        s2 = sizer.calc_volume_steps(Decimal("20000"), sl_distance_ticks=500)
+        assert s2 == s1 * 2
+
+    def test_min_volume_floor(self):
+        """残高ゼロでも min_volume_steps (=2) を返す (FSM半分利確の最低要件)。"""
+        sizer = self._sizer()
+        assert sizer.calc_volume_steps(Decimal("0"), sl_distance_ticks=300) == 2
+
+    def test_sl_zero_returns_min(self):
+        """SL距離ゼロは min_volume_steps (=2) を返す (ゼロ除算防止)。"""
+        sizer = self._sizer()
+        assert sizer.calc_volume_steps(Decimal("10000"), sl_distance_ticks=0) == 2
+
+    def test_max_volume_clip(self):
+        """巨大残高でも max_volume_steps でクリップされる。"""
+        sizer = self._sizer(max_steps=5)
+        steps = sizer.calc_volume_steps(Decimal("10_000_000"), sl_distance_ticks=1)
+        assert steps == 5
+
+    def test_wide_sl_reduces_steps(self):
+        """SL距離が大きいほどロットが減る (リスク一定)。"""
+        sizer = self._sizer()
+        s_narrow = sizer.calc_volume_steps(Decimal("10000"), sl_distance_ticks=100)
+        s_wide   = sizer.calc_volume_steps(Decimal("10000"), sl_distance_ticks=500)
+        assert s_narrow > s_wide
+
+    def test_integer_floor(self):
+        """端数は切り捨て (切り上げるとリスク超過になる)。"""
+        sizer = self._sizer()
+        # floor(100 / 3.00) = 33.33... → 33
+        steps = sizer.calc_volume_steps(Decimal("10000"), sl_distance_ticks=300)
+        risk = steps * 300 * self.TICK_VALUE
+        assert risk <= Decimal("10000") * Decimal("0.01")

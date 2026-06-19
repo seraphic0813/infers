@@ -12,6 +12,7 @@ BacktestEngine (backtest/engine.py) と LiveRunner (execution/mt5_adapter.py) �
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -21,9 +22,19 @@ from infers.ai.gateway import AiGateway, JudgementRequest
 from infers.analysis.dow import StructureEvent
 from infers.analysis.support_resistance import SRZone
 from infers.data.models import Candle
-from infers.execution.risk import OrderRequest, RiskManager
+from infers.execution.risk import OrderRequest, RiskManager, VolumeSizer
 from infers.execution.sim_broker import BrokerEvent
 from infers.execution.sm import BrokerPort, FsmConfig, PositionFSM, PosState
+
+
+class EquityProvider(Protocol):
+    """現在の口座残高 (equity) をアカウント通貨建てで返す。
+
+    バックテストは累積損益から算出し、ライブは MT5 account_info().equity を返す。
+    VolumeSizer と同一通貨建てで提供することが契約。
+    """
+
+    def equity(self) -> Decimal: ...
 
 
 @dataclass(frozen=True)
@@ -86,7 +97,9 @@ class TradingLoop:
     def __init__(self, *, broker: BrokerPort, gateway: AiGateway,
                  risk: RiskManager, fsm_config: FsmConfig,
                  journal: "JournalSink | None" = None,
-                 expiry_sink: "Callable[[str], None] | None" = None) -> None:
+                 expiry_sink: "Callable[[str], None] | None" = None,
+                 volume_sizer: "VolumeSizer | None" = None,
+                 equity_provider: "EquityProvider | None" = None) -> None:
         self._broker = broker
         self._gateway = gateway
         self._risk = risk
@@ -99,6 +112,9 @@ class TradingLoop:
         # None で従来挙動 (リカバリーなし)。プロバイダ側が opt-in を判定するため、
         # 配線は常時行ってよい (フラグ無効時は no-op)。
         self._expiry_sink = expiry_sink
+        # 可変ロットサイジング: 両方 None なら plan.volume_steps の固定値を使う (旧挙動)。
+        self._sizer = volume_sizer
+        self._equity_prov = equity_provider
         self.open_positions: dict[str, tuple[PositionFSM, TradePlan]] = {}
         self._current_day: date | None = None
 
@@ -192,9 +208,21 @@ class TradingLoop:
                 })
             if verdict.decision != "GO":
                 continue
+            # 可変ロットサイジング: EquityProvider + VolumeSizer が注入されている場合は
+            # 残高 × risk_pct ÷ SL距離 で発注ステップ数を決定する。
+            # 注入なし (省略時) は plan の固定値をそのまま使う (旧挙動・テスト互換)。
+            sl_dist = abs(plan.limit_price_int - plan.sl_int)
+            if self._sizer is not None and self._equity_prov is not None:
+                sized_volume = self._sizer.calc_volume_steps(
+                    self._equity_prov.equity(), sl_dist)
+                sized_add = sized_volume  # ADD は PROBE と同量
+                sized_plan = dataclasses.replace(
+                    plan, volume_steps=sized_volume, add_volume_steps=sized_add)
+            else:
+                sized_plan = plan
             ok = self._risk.approve(
                 OrderRequest(symbol=plan.request.symbol, direction=plan.direction,
-                             volume_steps=plan.volume_steps, kind="PROBE_LIMIT"),
+                             volume_steps=sized_plan.volume_steps, kind="PROBE_LIMIT"),
                 current_spread_ticks=spread_ticks,
                 open_total_volume_steps=open_volume,
             )
@@ -202,7 +230,7 @@ class TradingLoop:
                 if self._journal is not None:
                     self._journal.record("RISK_REJECT", {
                         "plan_id": plan.plan_id, "direction": plan.direction,
-                        "volume_steps": plan.volume_steps,
+                        "volume_steps": sized_plan.volume_steps,
                         "spread_ticks": spread_ticks})
                 continue
             fsm = PositionFSM(position_id=plan.plan_id, direction=plan.direction,
@@ -210,11 +238,11 @@ class TradingLoop:
                               journal_sink=(self._journal.fsm_sink(plan.plan_id)
                                             if self._journal is not None else None))
             fsm.place_probe(
-                limit_price_int=plan.limit_price_int,
-                volume_steps=plan.volume_steps, sl_int=plan.sl_int,
-                expiry=plan.expiry, invalidation_price=plan.invalidation_price)
-            self.open_positions[plan.plan_id] = (fsm, plan)
-            open_volume += plan.volume_steps
+                limit_price_int=sized_plan.limit_price_int,
+                volume_steps=sized_plan.volume_steps, sl_int=sized_plan.sl_int,
+                expiry=sized_plan.expiry, invalidation_price=sized_plan.invalidation_price)
+            self.open_positions[plan.plan_id] = (fsm, sized_plan)
+            open_volume += sized_plan.volume_steps
 
         return closed
 

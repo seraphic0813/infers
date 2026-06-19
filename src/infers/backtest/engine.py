@@ -23,16 +23,16 @@ from infers.ai.gateway import (
     AiGateway, EscalationPolicy, JudgementRequest, Tier, VerdictCache, cache_key,
 )
 from infers.analysis.indicators import Q
-from infers.core.loop import ProviderOutput, SignalProvider, TradePlan, TradingLoop
+from infers.core.loop import EquityProvider, ProviderOutput, SignalProvider, TradePlan, TradingLoop
 from infers.data.models import Candle, SymbolSpec, Timeframe
-from infers.execution.risk import RiskManager
+from infers.execution.risk import RiskManager, VolumeSizer
 from infers.execution.sim_broker import SimBroker
 from infers.execution.sm import FsmConfig
 
 __all__ = [
-    "BacktestEngine", "BacktestReport", "LedgerBroker", "ProviderOutput",
-    "SignalProvider", "SwapConfig", "TradePlan", "TradeRecord", "build_report",
-    "compute_swap_tick_steps", "load_candles_parquet",
+    "BacktestEngine", "BacktestEquityProvider", "BacktestReport", "LedgerBroker",
+    "ProviderOutput", "SignalProvider", "SwapConfig", "TradePlan", "TradeRecord",
+    "build_report", "compute_swap_tick_steps", "load_candles_parquet",
 ]
 
 
@@ -262,15 +262,39 @@ class TradeRecorder(Protocol):
 # エンジン本体
 # ---------------------------------------------------------------------------
 
+class BacktestEquityProvider:
+    """バックテスト中の口座残高を追跡する EquityProvider 実装。
+
+    initial_capital_usd + 累積実現損益 (tick_steps × tick_value_usd_per_step) を返す。
+    _finalize() からトレードが確定するたびに record_pnl() で更新する。
+    """
+
+    def __init__(self, initial_capital_usd: Decimal,
+                 tick_value_usd_per_step: Decimal) -> None:
+        self._initial = initial_capital_usd
+        self._tick_value = tick_value_usd_per_step
+        self._cumulative: int = 0  # tick_steps 単位の累積損益
+
+    def record_pnl(self, pnl_tick_steps: int) -> None:
+        self._cumulative += pnl_tick_steps
+
+    def equity(self) -> Decimal:
+        return self._initial + Decimal(self._cumulative) * self._tick_value
+
+
 class BacktestEngine:
     def __init__(self, *, broker: LedgerBroker, gateway: AiGateway,
                  risk: RiskManager, fsm_config: FsmConfig,
-                 swap: SwapConfig | None = None) -> None:
+                 swap: SwapConfig | None = None,
+                 volume_sizer: "VolumeSizer | None" = None,
+                 equity_provider: "BacktestEquityProvider | None" = None) -> None:
         self._broker = broker
         self._gateway = gateway
         self._risk = risk
         self._fsm_cfg = fsm_config
         self._swap = swap or SwapConfig()
+        self._sizer = volume_sizer
+        self._equity_prov = equity_provider
 
     # -- Pass 1: 裁定イベント収集 (LLMは一切呼ばない) ------------------------------
 
@@ -346,7 +370,9 @@ class BacktestEngine:
         expiry_sink = getattr(provider, "notify_probe_expired", None)
         loop = TradingLoop(broker=self._broker, gateway=self._gateway,
                            risk=self._risk, fsm_config=self._fsm_cfg,
-                           expiry_sink=expiry_sink)
+                           expiry_sink=expiry_sink,
+                           volume_sizer=self._sizer,
+                           equity_provider=self._equity_prov)
         trades: list[TradeRecord] = []
 
         for candle in candles:
@@ -384,6 +410,8 @@ class BacktestEngine:
         if recorder is not None and fsm_plan is not None:
             recorder.on_trade_closed(record, led, fsm_plan[0], fsm_plan[1])
         self._risk.record_realized(record.pnl_tick_steps)
+        if self._equity_prov is not None:
+            self._equity_prov.record_pnl(record.pnl_tick_steps)
         del self._broker.ledgers[position_id]
 
 

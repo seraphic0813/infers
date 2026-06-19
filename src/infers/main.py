@@ -254,6 +254,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="上位足(--wave2-tf)のエリオットで第2波を判定 (M5ノイズでなく本物の波)")
     p.add_argument("--be-sl-macro-tf", action="store_true",
                    help="建値SL移動を上位足ダウ構造で行う (現結合では利確パイプラインが停止しやすい)")
+    p.add_argument("--risk-pct", type=float, default=None,
+                   help="1トレードの最大リスク比率 (例: 0.01=1%%)。"
+                        "省略時は ProviderConfig.probe_volume_steps の固定ロット。"
+                        "指定時は 残高 × risk_pct ÷ SL距離 で発注ステップ数を算出し、"
+                        "残高が増えると自動的にロットが増える (資産比例型サイジング)")
+    p.add_argument("--min-be-distance", type=int, default=None,
+                   help="建値SL移動を許可する最小スイング距離 (ticks)。"
+                        "省略時は既定値(10 ticks=$0.10)。"
+                        "大きくするとSL_AT_BE遷移が遅れPROBE状態が長くなり追撃が増える "
+                        "(例: 200=2.00ドル, 500=5.00ドル)")
+    p.add_argument("--be-offset", type=int, default=None,
+                   help="建値SL = エントリー + この値(ticks)。"
+                        "省略時は既定値(2 ticks=$0.02)。"
+                        "大きくするとSL_AT_BE後のSL位置が遠くなりSL_AT_BE→ADD経路の余裕が増える")
     # 安全ガード (設計書 §11: デモ→最小ロットの段階を必ず踏む)
     p.add_argument("--demo", action="store_true", default=True,
                    help="デモ口座モード (既定)")
@@ -360,12 +374,44 @@ def run_backtest(args: argparse.Namespace) -> int:
               f"USD/ロット/夜, ロールオーバー {args.rollover_hour}:00 UTC, "
               f"水3倍={'有' if args.swap_triple_weekday == 2 else '無'} "
               f"(★ブローカー実値を --swap-long-usd/--swap-short-usd で設定のこと)")
+    fsm_config = FsmConfig(
+        min_be_distance_ticks=(args.min_be_distance
+                               if args.min_be_distance is not None
+                               else DEFAULT_FSM.min_be_distance_ticks),
+        be_offset_ticks=(args.be_offset
+                         if args.be_offset is not None
+                         else DEFAULT_FSM.be_offset_ticks),
+        breakout_buffer_ticks=DEFAULT_FSM.breakout_buffer_ticks,
+    )
+    # 可変ロットサイジング (--risk-pct 指定時のみ有効)
+    volume_sizer = None
+    equity_provider = None
+    if args.risk_pct is not None:
+        from infers.backtest.engine import BacktestEquityProvider
+        from infers.execution.risk import VolumeSizer, VolumeSizerConfig
+        spec = SYMBOLS[args.symbol]
+        tick_value = spec.tick_size * Decimal(args.contract_size) * spec.lot_step
+        volume_sizer = VolumeSizer(VolumeSizerConfig(
+            risk_pct=Decimal(str(args.risk_pct)),
+            tick_value_per_step=tick_value,
+            min_volume_steps=2,
+            max_volume_steps=DEFAULT_RISK.max_position_volume_steps,
+        ))
+        equity_provider = BacktestEquityProvider(
+            initial_capital_usd=Decimal(args.initial_capital),
+            tick_value_usd_per_step=tick_value,
+        )
+        print(f"sizing: risk={args.risk_pct*100:.1f}%  "
+              f"tick_value={tick_value} USD/tick/step  "
+              f"initial_equity={args.initial_capital} USD")
     engine = BacktestEngine(
         broker=LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5),
         gateway=gateway,
         risk=RiskManager(DEFAULT_RISK),
-        fsm_config=DEFAULT_FSM,
+        fsm_config=fsm_config,
         swap=swap,
+        volume_sizer=volume_sizer,
+        equity_provider=equity_provider,
     )
     report = engine.run(_with_progress(candles), build_provider(args),
                         recorder=recorder)
@@ -531,6 +577,18 @@ def run_live(args: argparse.Namespace) -> int:
     print(f"journal: {journal.path}")
     feed.connect()
     broker.connect()
+    # 可変ロットサイジング (--risk-pct 指定時のみ有効)
+    live_sizer = None
+    if args.risk_pct is not None:
+        from infers.execution.risk import VolumeSizer, VolumeSizerConfig
+        tick_val = broker.tick_value_per_step(args.symbol)
+        live_sizer = VolumeSizer(VolumeSizerConfig(
+            risk_pct=Decimal(str(args.risk_pct)),
+            tick_value_per_step=tick_val,
+            min_volume_steps=2,
+            max_volume_steps=DEFAULT_RISK.max_position_volume_steps,
+        ))
+        print(f"sizing: risk={args.risk_pct*100:.1f}%  tick_value={tick_val}/tick/step")
     try:
         runner = LiveRunner(
             feed=feed, spec=spec, tf=Timeframe(args.tf), broker=broker,
@@ -539,6 +597,7 @@ def run_live(args: argparse.Namespace) -> int:
             risk=RiskManager(DEFAULT_RISK), fsm_config=DEFAULT_FSM,
             journal=journal,
             warm_bars=args.warm_bars,
+            volume_sizer=live_sizer,
         )
         try:
             bars = runner.run(max_bars=args.max_bars)
