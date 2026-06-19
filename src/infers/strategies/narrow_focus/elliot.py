@@ -25,8 +25,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from infers.analysis.indicators import Q
-from infers.analysis.zigzag import SwingPoint
+from infers.indicators import Q
+from infers.strategies.narrow_focus.zigzag import SwingPoint
 
 # 1カウントの最大ピボット数: P0..P5 (推進5波)
 _MAX_PIVOTS = 6

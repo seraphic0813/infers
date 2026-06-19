@@ -11,7 +11,7 @@ import pytest
 
 from infers.data import mt5_feed
 from infers.data.feed import FeedError
-from infers.data.models import SymbolSpec, Timeframe
+from infers.core.models import SymbolSpec, Timeframe
 
 UTC = timezone.utc
 GOLD = SymbolSpec(name="XAUUSD", tick_size="0.01", lot_step="0.01", digits=2)

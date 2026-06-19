@@ -20,12 +20,12 @@ from infers.ai.gateway import (
     VerdictCache, cache_key,
 )
 from infers.core.loop import ProviderOutput, TradingLoop
-from infers.data.models import Candle, Timeframe
+from infers.core.models import Candle, Timeframe
 from infers.execution.sim_broker import SimBroker
 from infers.execution.sm import FsmConfig
 from infers.main import CacheOnlyClient
 from infers.analysis.dow import TrendState
-from infers.strategy.provider import (
+from infers.strategies.narrow_focus.provider import (
     FIB_RETRACE_RATIOS, MacroResampler, fib_retrace_levels, macro_gate,
 )
 

@@ -20,8 +20,8 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
-from infers.analysis.indicators import Q
-from infers.data.models import Timeframe
+from infers.indicators import Q
+from infers.core.models import Timeframe
 
 
 class Family(Enum):

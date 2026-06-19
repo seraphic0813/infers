@@ -14,12 +14,12 @@ from infers.ai.gateway import (
     AiGateway, EscalationPolicy, JudgementKind, JudgementRequest, Verdict, VerdictCache,
 )
 from infers.analysis.dow import StructureEvent, StructureEventType, TrendState
-from infers.analysis.zigzag import SwingPoint
+from infers.strategies.narrow_focus.zigzag import SwingPoint
 from infers.backtest.engine import LedgerBroker
 from infers.core.loop import ProviderOutput, TradePlan
 from infers.data.exporter import export_history
 from infers.data.feed import MarketFeed
-from infers.data.models import Candle, SymbolSpec, Timeframe
+from infers.core.models import Candle, SymbolSpec, Timeframe
 from infers.execution.mt5_adapter import LiveRunner
 from infers.execution.risk import RiskConfig, RiskManager
 from infers.execution.sm import FsmConfig, PosState
@@ -304,7 +304,7 @@ class TestMainEntry:
     def test_default_provider_is_full_pipeline(self):
         """--provider 省略時の既定は InfersSignalProvider (フェーズ9結合)。"""
         from infers.main import build_provider
-        from infers.strategy.provider import InfersSignalProvider
+        from infers.strategies.narrow_focus.provider import InfersSignalProvider
         args = parse_args(["--mode", "live", "--symbol", "XAUUSD", "--tf", "M5"])
         provider = build_provider(args)
         assert isinstance(provider, InfersSignalProvider)
@@ -424,7 +424,7 @@ class TestReconcile:
 # InfersSignalProvider (フェーズ9: 分析層フルパイプライン)
 # ---------------------------------------------------------------------------
 
-from infers.strategy.provider import InfersSignalProvider, ProviderConfig  # noqa: E402
+from infers.strategies.narrow_focus.provider import InfersSignalProvider, ProviderConfig  # noqa: E402
 
 # macro_filter=False: ここはミクロのプラン生成を検証する (マクロ方向フィルターは
 # 直交する別レイヤーで TestMacroGate/TestMacroResampler が担保)。
@@ -689,7 +689,7 @@ class TestMacroAdaptiveDepth:
     # deep cap  = 945 + 0.50 *210 = 1050、shallow cap = 945 + 0.618*210 ≈ 1075。
 
     def test_slope_aligned_detects_direction(self):
-        from infers.strategy.provider import _HtfSmaWall
+        from infers.strategies.narrow_focus.provider import _HtfSmaWall
         wall = _HtfSmaWall(period=3, atr_period=3, slope_lookback=4)
         for px in range(1000, 1100, 10):                  # 上昇系列
             wall.update(mk_candle(0, px + 2, px - 2, px, tf=Timeframe.D1))
@@ -697,7 +697,7 @@ class TestMacroAdaptiveDepth:
         assert wall.slope_aligned(-1) is False
 
     def test_slope_aligned_not_ready_is_false(self):
-        from infers.strategy.provider import _HtfSmaWall
+        from infers.strategies.narrow_focus.provider import _HtfSmaWall
         wall = _HtfSmaWall(period=200, atr_period=14, slope_lookback=5)
         wall.update(mk_candle(0, 1002, 998, 1000, tf=Timeframe.D1))
         assert wall.slope_aligned(+1) is False            # SMA未準備 → 保守側

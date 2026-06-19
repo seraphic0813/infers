@@ -15,7 +15,7 @@ import pytest
 
 from infers.ai.gateway import AiGateway, VerdictCache
 from infers.core.loop import ProviderOutput
-from infers.data.models import Timeframe
+from infers.core.models import Timeframe
 from infers.execution.mt5_adapter import LiveRunner
 from infers.execution.risk import RiskConfig, RiskManager
 from infers.execution.sm import FsmConfig

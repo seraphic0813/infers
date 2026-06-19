@@ -1,35 +1,21 @@
-"""分析層: インジケーター・スイング検出・ダウ理論 (設計書 §3〜4)。"""
+"""共有ダウ構造・レジサポ型 (L0/L2 双方から参照される過渡的な共有モジュール)。
 
-from infers.analysis.confluence import ConfluenceCluster, Evidence, Family, find_clusters
+dow.py / support_resistance.py は core/loop.py・execution/sm.py(L0)から
+StructureEvent/SRZone 型を直接参照されるため、手法層(strategies/)へは
+まだ完全移動していない(docs/phase2-architecture.md §8 既知の課題。
+ExecutionModel抽象化(段階2.3)で解消予定)。それ以外のNarrow Focus固有の
+分析モジュール(zigzag/elliot/fibonacci/micro/future_discretion/confluence)
+は strategies/narrow_focus/ へ移動済み。
+"""
+
 from infers.analysis.dow import (
     DowStateMachine, StructureEvent, StructureEventType, TrendState, classify_dow,
 )
-from infers.analysis.elliot import ElliottCounter, ElliottView, WaveCount, count_waves
-from infers.analysis.fibonacci import FibTarget, project, project_wave3, project_wave5
-from infers.analysis.future_discretion import (
-    FutureCell, FutureConfluence, RsiBand, build_future_map, make_paths,
-    propose_limit_orders, rsi_band, sma_forward_linear, sma_slope_sign,
-    sma_touch_curve, sma_touch_price,
-)
-from infers.analysis.indicators import ATR, SMA, RsiState, WilderRSI, rsi_forward, rsi_value
-from infers.analysis.micro import (
-    GranvilleDetector, GranvilleSignal, RsiExtremeDetector, RsiExtremeRecency,
-    classify_rsi, normalized_deviation, sma_slope,
-)
 from infers.analysis.support_resistance import SRZone, build_zones
-from infers.analysis.zigzag import SwingPoint, ZigZagDetector
+from infers.indicators import ATR, SMA, RsiState, WilderRSI, rsi_forward, rsi_value
 
 __all__ = [
     "ATR", "SMA", "WilderRSI", "RsiState", "rsi_forward", "rsi_value",
-    "ZigZagDetector", "SwingPoint",
     "DowStateMachine", "StructureEvent", "StructureEventType", "TrendState", "classify_dow",
-    "ElliottCounter", "ElliottView", "WaveCount", "count_waves",
-    "FibTarget", "project", "project_wave3", "project_wave5",
-    "GranvilleDetector", "GranvilleSignal", "RsiExtremeDetector", "RsiExtremeRecency",
-    "classify_rsi", "normalized_deviation", "sma_slope",
     "SRZone", "build_zones",
-    "ConfluenceCluster", "Evidence", "Family", "find_clusters",
-    "FutureCell", "FutureConfluence", "RsiBand", "build_future_map", "make_paths",
-    "propose_limit_orders", "rsi_band", "sma_forward_linear", "sma_slope_sign",
-    "sma_touch_curve", "sma_touch_price",
 ]

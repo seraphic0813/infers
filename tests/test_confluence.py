@@ -5,14 +5,14 @@ from decimal import Decimal
 
 import pytest
 
-from infers.analysis.confluence import ConfluenceCluster, Evidence, Family, find_clusters
-from infers.analysis.micro import (
+from infers.strategies.narrow_focus.confluence import ConfluenceCluster, Evidence, Family, find_clusters
+from infers.strategies.narrow_focus.micro import (
     GranvilleDetector, RsiExtremeDetector, RsiExtremeRecency, classify_rsi,
     normalized_deviation, sma_slope,
 )
 from infers.analysis.support_resistance import build_zones
-from infers.analysis.zigzag import SwingPoint
-from infers.data.models import Candle, Timeframe
+from infers.strategies.narrow_focus.zigzag import SwingPoint
+from infers.core.models import Candle, Timeframe
 
 UTC = timezone.utc
 T0 = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)

@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from infers.data.exporter import load_history
-from infers.data.models import Timeframe
+from infers.core.models import Timeframe
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = Path(__file__).resolve().parent

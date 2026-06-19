@@ -9,10 +9,10 @@ from decimal import Decimal
 
 import pytest
 
-from infers.analysis.elliot import ElliottCounter, WaveCount, count_waves
-from infers.analysis.fibonacci import project, project_wave3, project_wave5
-from infers.analysis.zigzag import SwingPoint
-from infers.data.models import Timeframe
+from infers.strategies.narrow_focus.elliot import ElliottCounter, WaveCount, count_waves
+from infers.strategies.narrow_focus.fibonacci import project, project_wave3, project_wave5
+from infers.strategies.narrow_focus.zigzag import SwingPoint
+from infers.core.models import Timeframe
 
 UTC = timezone.utc
 T0 = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)

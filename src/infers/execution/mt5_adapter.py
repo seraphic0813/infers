@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping
 from infers.ai.gateway import AiGateway
 from infers.core.loop import ProviderOutput, SignalProvider, TradingLoop
 from infers.data.feed import FeedError, MarketFeed
-from infers.data.models import Candle, SymbolSpec, Timeframe
+from infers.core.models import Candle, SymbolSpec, Timeframe
 from infers.execution.risk import RiskManager
 from infers.execution.sim_broker import BrokerEvent
 from infers.execution.sm import FsmConfig, PositionFSM, PosState

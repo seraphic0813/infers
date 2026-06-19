@@ -6,9 +6,9 @@ from decimal import Decimal
 import pytest
 
 from infers.analysis.dow import DowStateMachine, StructureEventType, TrendState
-from infers.analysis.indicators import ATR, Q, SMA, RsiState, WilderRSI, rsi_forward
-from infers.analysis.zigzag import SwingPoint, ZigZagDetector
-from infers.data.models import Candle, Timeframe
+from infers.indicators import ATR, Q, SMA, RsiState, WilderRSI, rsi_forward
+from infers.strategies.narrow_focus.zigzag import SwingPoint, ZigZagDetector
+from infers.core.models import Candle, Timeframe
 
 UTC = timezone.utc
 T0 = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)

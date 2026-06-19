@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Iterator
 
-from infers.data.models import Candle, SymbolSpec, Timeframe
+from infers.core.models import Candle, SymbolSpec, Timeframe
 
 
 class FeedError(RuntimeError):

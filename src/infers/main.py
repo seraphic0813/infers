@@ -35,7 +35,7 @@ from infers.ai.gateway import (
 )
 from infers.ai.rule_judge import RuleBasedLlmClient
 from infers.core.loop import ProviderOutput, SignalProvider
-from infers.data.models import Candle, SymbolSpec, Timeframe
+from infers.core.models import Candle, SymbolSpec, Timeframe
 from infers.execution.risk import RiskConfig, RiskManager
 from infers.execution.sm import FsmConfig
 
@@ -100,7 +100,7 @@ def build_provider(args: argparse.Namespace) -> SignalProvider:
     """
     if args.provider:
         return load_provider(args.provider)
-    from infers.strategy.provider import InfersSignalProvider, ProviderConfig
+    from infers.strategies.narrow_focus.provider import InfersSignalProvider, ProviderConfig
     rsi_mtfs = (() if args.no_rsi_mtf
                 else tuple(Timeframe(t) for t in args.rsi_mtf))
     macro_k = (Decimal(str(args.macro_k_atr_reversal))

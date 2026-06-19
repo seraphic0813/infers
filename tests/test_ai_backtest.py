@@ -11,12 +11,12 @@ from infers.ai.gateway import (
     Verdict, VerdictCache, cache_key,
 )
 from infers.analysis.dow import StructureEvent, StructureEventType, TrendState
-from infers.analysis.zigzag import SwingPoint
+from infers.strategies.narrow_focus.zigzag import SwingPoint
 from infers.backtest.engine import (
     BacktestEngine, LedgerBroker, ProviderOutput, SwapConfig, TradePlan, TradeRecord,
     build_report, compute_swap_tick_steps, _weighted_nights,
 )
-from infers.data.models import Candle, Timeframe
+from infers.core.models import Candle, Timeframe
 from infers.execution.risk import RiskConfig, RiskManager
 from infers.execution.sm import FsmConfig
 

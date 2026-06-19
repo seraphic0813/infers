@@ -13,8 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 
-from infers.analysis.elliot import WaveCount
-from infers.analysis.zigzag import SwingPoint
+from infers.strategies.narrow_focus.elliot import WaveCount
+from infers.strategies.narrow_focus.zigzag import SwingPoint
 
 # マニュアル 2.3 指定の投影比率
 RATIOS: tuple[tuple[str, Decimal], ...] = (

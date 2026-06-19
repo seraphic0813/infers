@@ -33,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterator
 
-from infers.data.models import utc_now
+from infers.core.models import utc_now
 
 # ルールゲートが特徴量を実評価した Verdict の source 値 (ゴールデンリプレイ対象)。
 # POLICY (閾値未満) / GUARDRAIL (障害) は特徴量評価ではないため再計算対象外。

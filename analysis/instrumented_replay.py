@@ -20,7 +20,7 @@ from infers.ai.gateway import cache_key
 from infers.backtest.engine import LedgerBroker, TradeRecord, build_report
 from infers.core.loop import TradingLoop
 from infers.data.exporter import load_history
-from infers.data.models import Timeframe
+from infers.core.models import Timeframe
 from infers.execution.risk import RiskManager
 from infers.main import (
     DEFAULT_FSM, DEFAULT_POLICY, DEFAULT_RISK, _build_gateway, build_provider,

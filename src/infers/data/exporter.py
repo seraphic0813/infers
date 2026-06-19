@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from infers.data.feed import MarketFeed, ensure_utc
-from infers.data.models import Candle, SymbolSpec, Timeframe
+from infers.core.models import Candle, SymbolSpec, Timeframe
 
 # 1回の get_history で取得する期間 (MT5のバー数上限対策)
 DEFAULT_CHUNK = timedelta(days=30)

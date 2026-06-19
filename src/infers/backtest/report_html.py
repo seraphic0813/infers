@@ -26,7 +26,7 @@ from typing import Iterable
 from infers.ai.gateway import AiGateway, JudgementRequest, Verdict
 from infers.backtest.engine import BacktestReport, TradeRecord, _Ledger
 from infers.core.loop import TradePlan
-from infers.data.models import Candle, SymbolSpec, Timeframe
+from infers.core.models import Candle, SymbolSpec, Timeframe
 
 _Q2 = Decimal("0.01")
 

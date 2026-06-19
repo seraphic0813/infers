@@ -125,7 +125,7 @@ def _default_runner_factory(*, args, login, password, server, journal):
     provider は _WarmupProvider で包むだけ (ウォームアップ自体は controller が
     stop 割り込み・進捗管理付きで実行する)。
     """
-    from infers.data.models import Timeframe
+    from infers.core.models import Timeframe
     from infers.data.mt5_feed import MT5Feed
     from infers.execution.mt5_adapter import LiveRunner, MT5LiveBroker
     from infers.execution.risk import RiskManager
@@ -223,7 +223,7 @@ class LiveController:
             # ウォームアップ (stop 割り込み可・進捗は status の warmup_bars に逐次反映)。
             provider = getattr(self._runner, "_provider", None)
             if warmup_days > 0 and hasattr(provider, "warmup"):
-                from infers.data.models import Timeframe
+                from infers.core.models import Timeframe
                 from infers.main import SYMBOLS
                 provider.warmup(self._feed, SYMBOLS[symbol], Timeframe(args.tf),
                                 days=warmup_days, stop=self._stop)

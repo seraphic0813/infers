@@ -31,7 +31,7 @@ from typing import Callable, Protocol
 
 from infers.analysis.dow import StructureEvent, StructureEventType, TrendState
 from infers.analysis.support_resistance import SRZone
-from infers.data.models import Candle
+from infers.core.models import Candle
 
 
 class PosState(Enum):

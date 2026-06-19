@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Literal
 
-from infers.analysis.zigzag import SwingPoint
+from infers.strategies.narrow_focus.zigzag import SwingPoint
 
 
 class StructureEventType(Enum):

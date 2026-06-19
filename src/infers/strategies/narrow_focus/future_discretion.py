@@ -24,8 +24,8 @@ from datetime import datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Sequence
 
-from infers.analysis.indicators import Q, RsiState, rsi_forward
-from infers.analysis.micro import RSI_OVERBOUGHT, RSI_OVERSOLD
+from infers.indicators import Q, RsiState, rsi_forward
+from infers.strategies.narrow_focus.micro import RSI_OVERBOUGHT, RSI_OVERSOLD
 from infers.analysis.support_resistance import SRZone
 
 # 戻り挟みパスの既定反発比率 (設計書 §5.3 パス族表)

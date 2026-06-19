@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from infers.data.models import Candle
+from infers.core.models import Candle
 
 
 class BrokerRejection(RuntimeError):

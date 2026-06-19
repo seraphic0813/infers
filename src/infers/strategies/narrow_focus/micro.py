@@ -16,8 +16,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from infers.analysis.indicators import Q
-from infers.data.models import Candle
+from infers.indicators import Q
+from infers.core.models import Candle
 
 GranvilleKind = Literal["BUY2", "BUY3", "BUY4", "SELL2", "SELL3", "SELL4"]
 

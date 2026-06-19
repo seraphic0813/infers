@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from infers.data.models import Candle, Timeframe
+from infers.core.models import Candle, Timeframe
 
 
 @dataclass(frozen=True)

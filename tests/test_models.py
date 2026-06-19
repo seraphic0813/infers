@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from infers.data.models import Candle, SymbolSpec, Timeframe
+from infers.core.models import Candle, SymbolSpec, Timeframe
 
 GOLD = SymbolSpec(name="XAUUSD", tick_size=Decimal("0.01"), lot_step=Decimal("0.01"), digits=2)
 UTC = timezone.utc

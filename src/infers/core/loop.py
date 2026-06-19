@@ -21,7 +21,7 @@ from typing import Callable, Iterable, Protocol
 from infers.ai.gateway import AiGateway, JudgementRequest
 from infers.analysis.dow import StructureEvent
 from infers.analysis.support_resistance import SRZone
-from infers.data.models import Candle
+from infers.core.models import Candle
 from infers.execution.risk import OrderRequest, RiskManager, VolumeSizer
 from infers.execution.sim_broker import BrokerEvent
 from infers.execution.sm import BrokerPort, FsmConfig, PositionFSM, PosState

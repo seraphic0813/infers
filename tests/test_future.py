@@ -5,11 +5,11 @@ from decimal import Decimal
 
 import pytest
 
-from infers.analysis.future_discretion import (
+from infers.strategies.narrow_focus.future_discretion import (
     FutureCell, build_future_map, make_paths, propose_limit_orders,
     rsi_band, sma_forward_linear, sma_slope_sign, sma_touch_curve, sma_touch_price,
 )
-from infers.analysis.indicators import Q, RsiState
+from infers.indicators import Q, RsiState
 from infers.analysis.support_resistance import SRZone
 
 UTC = timezone.utc

@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 from infers.data.feed import FeedError, MarketFeed, ensure_utc
-from infers.data.models import Candle, SymbolSpec, Timeframe, utc_now
+from infers.core.models import Candle, SymbolSpec, Timeframe, utc_now
 
 
 class MT5Feed(MarketFeed):

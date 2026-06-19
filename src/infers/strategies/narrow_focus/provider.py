@@ -27,14 +27,14 @@ from decimal import ROUND_HALF_EVEN, Decimal
 
 from infers.ai.gateway import JudgementKind, JudgementRequest
 from infers.analysis.dow import DowStateMachine, StructureEvent, TrendState, classify_dow
-from infers.analysis.elliot import ElliottCounter, ElliottView, WaveCount
-from infers.analysis.future_discretion import build_future_map, propose_limit_orders
-from infers.analysis.indicators import ATR, SMA, WilderRSI
-from infers.analysis.micro import RSI_EVENT_WINDOW, RsiExtremeRecency
+from infers.strategies.narrow_focus.elliot import ElliottCounter, ElliottView, WaveCount
+from infers.strategies.narrow_focus.future_discretion import build_future_map, propose_limit_orders
+from infers.indicators import ATR, SMA, WilderRSI
+from infers.strategies.narrow_focus.micro import RSI_EVENT_WINDOW, RsiExtremeRecency
 from infers.analysis.support_resistance import build_zones
-from infers.analysis.zigzag import SwingPoint, ZigZagDetector
+from infers.strategies.narrow_focus.zigzag import SwingPoint, ZigZagDetector
 from infers.core.loop import ProviderOutput, TradePlan
-from infers.data.models import Candle, Timeframe
+from infers.core.models import Candle, Timeframe
 
 FIB_161_8 = Decimal("1.618")
 

@@ -14,10 +14,10 @@ from infers.ai.gateway import (
 )
 from infers.ai.rule_judge import RuleBasedLlmClient
 from infers.analysis.dow import StructureEvent, StructureEventType, TrendState
-from infers.analysis.zigzag import SwingPoint
+from infers.strategies.narrow_focus.zigzag import SwingPoint
 from infers.backtest.engine import LedgerBroker
 from infers.core.loop import ProviderOutput, TradePlan
-from infers.data.models import Timeframe
+from infers.core.models import Timeframe
 from infers.execution.mt5_adapter import LiveRunner
 from infers.execution.risk import RiskConfig, RiskManager
 from infers.execution.sm import FsmConfig

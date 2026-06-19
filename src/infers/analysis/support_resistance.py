@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Literal, Sequence
 
-from infers.analysis.indicators import Q
-from infers.analysis.zigzag import SwingPoint
+from infers.indicators import Q
+from infers.strategies.narrow_focus.zigzag import SwingPoint
 
 # 既定パラメータ (バックテストで調整)
 ZONE_WIDTH_ATR = Decimal("0.5")    # ゾーン幅 ε = α × ATR

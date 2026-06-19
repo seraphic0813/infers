@@ -9,8 +9,8 @@ from hypothesis import strategies as st
 
 from infers.analysis.dow import StructureEvent, StructureEventType, TrendState
 from infers.analysis.support_resistance import SRZone
-from infers.analysis.zigzag import SwingPoint
-from infers.data.models import Candle, Timeframe
+from infers.strategies.narrow_focus.zigzag import SwingPoint
+from infers.core.models import Candle, Timeframe
 from infers.execution.risk import OrderRequest, RiskConfig, RiskManager
 from infers.execution.sim_broker import BrokerRejection, SimBroker
 from infers.execution.sm import (
