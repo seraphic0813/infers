@@ -33,7 +33,7 @@ from infers.indicators import ATR, SMA, WilderRSI
 from infers.strategies.narrow_focus.micro import RSI_EVENT_WINDOW, RsiExtremeRecency
 from infers.analysis.support_resistance import build_zones
 from infers.strategies.narrow_focus.zigzag import SwingPoint, ZigZagDetector
-from infers.core.loop import ProviderOutput, TradePlan
+from infers.strategies.narrow_focus.signals import ProviderOutput, TradePlan
 from infers.core.models import Candle, Timeframe
 
 FIB_161_8 = Decimal("1.618")

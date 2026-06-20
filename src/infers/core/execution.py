@@ -20,6 +20,34 @@ from typing import Protocol
 from infers.core.models import Candle
 
 
+class TransitionError(RuntimeError):
+    """現在状態で許可されない操作 (汎用 FSM エラー)。"""
+
+
+class SlMonotonicityError(RuntimeError):
+    """SLを利益方向以外へ動かそうとした (CLAUDE.md 第3条違反の試行)。
+
+    全執行モデルに強制される安全不変条件 (SL単調性) の番人。手法に依らず
+    L0 で共通定義する。
+    """
+
+
+class BrokerPort(Protocol):
+    """執行先の抽象 (Sim / MT5 を差し替え可能に。CLAUDE.md 第12条)。
+
+    全執行モデルが共有する発注境界。手法非依存のため L0 に置く。
+    """
+
+    def place_limit(self, *, client_order_id: str, position_id: str, direction: int,
+                    price_int: int, volume_steps: int, sl_int: int) -> None: ...
+    def place_market(self, *, client_order_id: str, position_id: str, direction: int,
+                     volume_steps: int, sl_int: int) -> int: ...
+    def modify_sl(self, *, position_id: str, new_sl_int: int) -> None: ...
+    def close_volume(self, *, client_order_id: str, position_id: str,
+                     volume_steps: int) -> int: ...
+    def cancel(self, *, client_order_id: str) -> None: ...
+
+
 @dataclass(frozen=True)
 class BarOutcome:
     """確定足1本を処理した結果として、TradingLoop が知る必要のある事実のみ。
