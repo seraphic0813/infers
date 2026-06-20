@@ -83,3 +83,8 @@ class TestTimeframe:
     def test_durations(self):
         assert Timeframe.M5.duration == timedelta(minutes=5)
         assert Timeframe.W1.duration == timedelta(weeks=1)
+
+    def test_m30_duration(self):
+        # smc_bos 手法の判定TF (spec.md §5.6)。M15 と H1 の中間。
+        assert Timeframe.M30.duration == timedelta(minutes=30)
+        assert Timeframe.M15.duration < Timeframe.M30.duration < Timeframe.H1.duration

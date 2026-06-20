@@ -96,6 +96,7 @@ class MT5Feed(MarketFeed):
         return {
             Timeframe.M5: mt5.TIMEFRAME_M5,
             Timeframe.M15: mt5.TIMEFRAME_M15,
+            Timeframe.M30: mt5.TIMEFRAME_M30,
             Timeframe.H1: mt5.TIMEFRAME_H1,
             Timeframe.H4: mt5.TIMEFRAME_H4,
             Timeframe.D1: mt5.TIMEFRAME_D1,

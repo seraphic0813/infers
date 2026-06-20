@@ -24,6 +24,7 @@ class Timeframe(str, Enum):
 
     M5 = "M5"
     M15 = "M15"
+    M30 = "M30"
     H1 = "H1"
     H4 = "H4"
     D1 = "D1"
@@ -42,6 +43,7 @@ class Timeframe(str, Enum):
 _DURATIONS: dict[Timeframe, timedelta] = {
     Timeframe.M5: timedelta(minutes=5),
     Timeframe.M15: timedelta(minutes=15),
+    Timeframe.M30: timedelta(minutes=30),
     Timeframe.H1: timedelta(hours=1),
     Timeframe.H4: timedelta(hours=4),
     Timeframe.D1: timedelta(days=1),
