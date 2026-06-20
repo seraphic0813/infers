@@ -15,7 +15,7 @@
 - **目的**: 複数のトレード手法を Python 自動取引Bot+長期バックテストとして実装・比較できるプラットフォーム。各手法は自前の分析(`SignalProvider`)と執行ライフサイクル(`ExecutionModel`)を差し替えられる
 - **対象**: BTCUSD (Vantage Trading)、XAUUSD (Swift Trader) — いずれも MT4/MT5系ブローカー
 - **アーキテクチャ**: 6層 — L0 core(手法非依存の実行コア・ブローカー/執行抽象)/ L1 indicators(汎用インジケーター)/ L2 strategies(手法ごとの分析+執行)/ L3 backtest / L4 frontend / L5 live。手法は `strategies/registry.py` の `StrategySpec` で名前登録し `--strategy <名前>` で選択。**L0 は手法固有の語彙を一切持たない**(`TradingLoop` は `ExecutionModel` 抽象のみに依存)。詳細は phase2 設計書
-- **登録済み手法**: `narrow_focus` / `depth50`(基準実装・既定執行モデル)、`market_tpsl`(SMAクロス+成行/固定TP-SL。執行抽象が手法非依存であることの実証用に、Narrow Focus とは別の執行ライフサイクルを持つ)
+- **登録済み手法**: `narrow_focus` / `depth50`(基準実装・既定執行モデル)、`market_tpsl`(SMAクロス+成行/固定TP-SL。執行抽象が手法非依存であることの実証用に、Narrow Focus とは別の執行ライフサイクルを持つ)、`smc_bos`(XAUUSD M30、SMC BOS+EMA80フィルタ+成行/固定RR利確。詳細は [smc_bos/spec.md](src/infers/strategies/smc_bos/spec.md))
 - **Narrow Focus 手法のエントリー手法(正は [narrow_focus/entry-methodology.md](src/infers/strategies/narrow_focus/entry-methodology.md))**: 3ゲート構成 — ①マクロ環境認識(**ダウ理論(D1/H1)で方向を確定**、200SMA位置で確認。逆方向を100%遮断)→ ②コンフルエンス(ダウ順行・**200SMAグランビル**・90SMAグランビル・水平レジサポ・**RSIマルチTF(M5/H1/D1)**・**40%深さスクリーニング** が規定数以上重複)→ ③ニュース遮断(重要指標±30分は全面見送り)。エリオット波動は第2波の構造文脈、フィボは**押し目ゾーン特定+利確目標161.8%**(エントリー加点にはしない)。40%深さは原典に無いシステム化の追加フィルター。**この節は Narrow Focus 手法の契約であって、他手法には適用されない**
 
 ## 開発環境
