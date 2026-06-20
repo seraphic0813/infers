@@ -337,3 +337,30 @@ python -m infers.main --mode backtest --data data/xauusd_m30.parquet --tf M30 --
   --strategy smc_bos --ai-client none --verdict-cache work/cache/verdicts_smcbos.sqlite3 \
   --report reports/smc_bos_full
 ```
+
+## 段階S4: `be_mode`(SL前進)3方式の実測比較(2026-06-20)
+
+段階S2/S3は `be_mode=off`(SL前進なし)のみだった。段階S4で出典準拠の `at_1r`(含み益1Rで建値化)
+と代替の `structure`(構造SL前進)を実装し、同一データ(XAUUSD M30・5年・スワップ込み)・
+同一エントリー条件(トレード数197で固定)で3方式を比較した。
+
+| be_mode | トレード数 | PF | 勝率 | be_sl_exit_rate | 最大DD | 純益(5年) |
+|---|---|---|---|---|---|---|
+| **off**(既定) | 197 | **1.456322103** | 31.98% | 0% | $911.78 | **+$4,258.48** |
+| at_1r(出典準拠) | 197 | 1.383701289 | 20.81% | 5.08% | $1,027.92 | +$2,339.68 |
+| structure | 197 | 1.042033434 | 41.12% | 36.55% | $843.42 | +$144.88 |
+
+**結果: `off` が全指標(PF・純益)で `at_1r`/`structure` を上回った。** `at_1r` は `off` に対し
+PF・勝率・DD・純益のすべてで劣後する(支配される関係)。早期建値化が「勝ちトレードを伸ばす前に
+SLを引き上げてしまう」副作用を持ち、win_rateが31.98%→20.81%へ大幅に低下した(be_sl_exit_rate
+5.08%分の旧勝ちトレードが「建値退出」へ振り替わったため)。`structure` は対照的に勝率(41.12%)と
+DD($843.42)が改善するが、PFが1.04まで低下し5年純益がほぼゼロ(+$144.88)に縮小する。
+
+**読み方**: この「早期建値化が trend-following のパフォーマンスを損なう」現象は、本プロジェクトの
+Narrow Focus 手法が entry-methodology.md で**含み益トリガーのSL移動をそもそも禁じている理由**
+(「含み益が出た瞬間に建値SLにするとノイズに狩られる」)と同質であり、別ロジックの手法・別TFである
+smc_bosでも同様の傾向が再現されたことを示す。
+
+**判定: `be_mode=off` を実装上の既定として確定する。** `at_1r`(原典準拠)・`structure` は
+実装・単体テストとも完備した opt-in として残置する(将来のパラメータ最適化や他シンボルでの
+再評価に向けて)。詳細は [strategies/smc_bos/spec.md](../src/infers/strategies/smc_bos/spec.md) §3.3。

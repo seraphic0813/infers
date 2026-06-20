@@ -1,5 +1,6 @@
-"""smc_bos 手法 (段階S2): 構造検出・BOS判定・執行モデル・分析層・レジストリ配線・
-結合(BacktestEngine→TradingLoop→SmcExecution)の検証。spec.md 参照。"""
+"""smc_bos 手法 (段階S2〜S4): 構造検出・BOS判定・執行モデル(SL前進含む)・
+分析層・レジストリ配線・結合(BacktestEngine→TradingLoop→SmcExecution)の検証。
+spec.md 参照。"""
 
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from infers.strategies.narrow_focus.execution import FsmConfig
 from infers.strategies.registry import get_strategy
 from infers.strategies.smc_bos.execution import SmcExecution, SmcState
 from infers.strategies.smc_bos.provider import SmcBosProvider
+from infers.strategies.smc_bos.signals import SmcOutput
 from infers.strategies.smc_bos.structure import SwingDetector, SwingPoint, bos_direction
 
 UTC = timezone.utc
@@ -219,6 +221,144 @@ class TestSmcExecution:
         ex.close("END_OF_DATA")
         assert ex.closed and ex.volume_steps == 0
         assert ex.journal[-1][0] == "CLOSE_ALL"
+
+    def test_invalid_be_mode_rejected(self):
+        broker = self._broker()
+        with pytest.raises(ValueError):
+            SmcExecution(position_id="s5", direction=+1, broker=broker, be_mode="bogus")
+
+
+# ---------------------------------------------------------------------------
+# 3.5 SmcExecution: SL前進(be_mode, 段階S4 / spec.md §3.3)
+# ---------------------------------------------------------------------------
+
+class _LongIntent:
+    limit_price_int = 1000
+    sl_int = 980
+    fib_target_int = 1040
+    volume_steps = 2
+
+
+class TestSmcExecutionSlAdvance:
+    def _broker(self) -> SimBroker:
+        b = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        b.process_bar(mk(0, 1005, 995, 1000))
+        return b
+
+    def test_default_be_mode_is_off(self):
+        """既定 (be_mode未指定) は off。実測比較(spec.md §3.3)で at_1r/structure
+        を一貫して上回ったため、原典の1:1建値化はopt-inに留める。"""
+        broker = self._broker()
+        ex = SmcExecution(position_id="a1", direction=+1, broker=broker)
+        ex.place(_LongIntent())   # risk=20 → 1R水準=1020 だが be_mode=off では無関係
+        bar = mk(1, 1035, 1020, 1030)   # 1Rを大きく超える高値だが前進しない
+        ex.on_bar(bar, None)
+        assert ex.sl_int == 980   # 既定では前進しない
+
+    def test_at_1r_no_advance_before_trigger(self):
+        broker = self._broker()
+        ex = SmcExecution(position_id="a2", direction=+1, broker=broker, be_mode="at_1r")
+        ex.place(_LongIntent())
+        bar = mk(1, 1015, 1005, 1010)   # 高値1015<1020 → 1R未達
+        ex.on_bar(bar, None)
+        assert ex.sl_int == 980        # 未前進
+
+    def test_at_1r_advance_is_idempotent_across_bars(self):
+        broker = self._broker()
+        ex = SmcExecution(position_id="a3", direction=+1, broker=broker, be_mode="at_1r")
+        ex.place(_LongIntent())
+        bar1 = mk(1, 1025, 1010, 1018)
+        ex.on_bar(bar1, None)
+        assert ex.sl_int == 1002
+        bar2 = mk(2, 1030, 1015, 1022)   # 依然1020以上だがTP1040未達
+        ex.on_bar(bar2, None)
+        assert ex.sl_int == 1002        # 再前進せず同値 (例外も起きない)
+        assert sum(1 for n, _ in ex.journal if n == "MOVE_SL") == 1
+
+    def test_be_mode_off_never_advances(self):
+        broker = self._broker()
+        ex = SmcExecution(position_id="a4", direction=+1, broker=broker, be_mode="off")
+        ex.place(_LongIntent())
+        bar = mk(1, 1035, 1020, 1030)   # 1R(1020)を大きく超える高値だが前進しない
+        ex.on_bar(bar, None)
+        assert ex.sl_int == 980
+
+    def test_short_direction_at_1r_advance(self):
+        broker = self._broker()
+        ex = SmcExecution(position_id="a5", direction=-1, broker=broker, be_mode="at_1r")
+
+        class _ShortIntent:
+            limit_price_int = 1000
+            sl_int = 1020
+            fib_target_int = 960
+            volume_steps = 2
+
+        ex.place(_ShortIntent())   # risk=20 → 1R水準=980, entry fill=998
+        bar = mk(1, 990, 975, 982)   # 安値975<=980 → 1Rトリガー、TP960未達
+        ex.on_bar(bar, None)
+        assert ex.sl_int == 998
+
+    def test_structure_mode_advances_to_signal_swing(self):
+        broker = self._broker()
+        ex = SmcExecution(position_id="a6", direction=+1, broker=broker, be_mode="structure")
+        ex.place(_LongIntent())
+        bar = mk(1, 1010, 1000, 1005)
+        ex.on_bar(bar, SmcOutput(swing_low_int=995))   # 980より利益方向 → 前進
+        assert ex.sl_int == 995
+
+    def test_structure_mode_ignores_worse_swing(self):
+        broker = self._broker()
+        ex = SmcExecution(position_id="a7", direction=+1, broker=broker, be_mode="structure")
+        ex.place(_LongIntent())
+        bar = mk(1, 1010, 1000, 1005)
+        ex.on_bar(bar, SmcOutput(swing_low_int=970))   # 980より不利 → 無視
+        assert ex.sl_int == 980
+
+    def test_structure_mode_handles_none_signal(self):
+        broker = self._broker()
+        ex = SmcExecution(position_id="a8", direction=+1, broker=broker, be_mode="structure")
+        ex.place(_LongIntent())
+        bar = mk(1, 1010, 1000, 1005)
+        ex.on_bar(bar, None)   # クラッシュしない
+        assert ex.sl_int == 980
+
+    def test_structure_mode_advance_does_not_block_tp(self):
+        """SL前進とTP決済は同一on_bar呼び出し内で両立する。"""
+        broker = self._broker()
+        ex = SmcExecution(position_id="a9", direction=+1, broker=broker, be_mode="at_1r")
+        ex.place(_LongIntent())
+        bar = mk(1, 1045, 1020, 1042)   # 1Rトリガー(1020)とTP(1040)を同一バーで両方満たす
+        out = ex.on_bar(bar, None)
+        assert out.closed and ex.state is SmcState.CLOSED
+        assert ex.journal[-1][0] == "TP_CLOSE"
+
+
+@pytest.mark.property
+@settings(max_examples=200, deadline=None)
+@given(
+    direction=st.sampled_from([+1, -1]),
+    targets=st.lists(st.integers(min_value=900_000, max_value=1_100_000),
+                     min_size=1, max_size=30),
+)
+def test_advance_sl_to_never_retreats(direction, targets):
+    """spec.md §A-3: どんなランダムなターゲット列でもSLは利益方向にしか動かない。"""
+    broker = SimBroker(spread_ticks=2, min_stop_distance_ticks=0)
+    broker.process_bar(mk(0, 1_010_000, 990_000, 1_000_000))
+    ex = SmcExecution(position_id="propx", direction=direction, broker=broker, be_mode="off")
+
+    class _Intent:
+        limit_price_int = 1_000_000
+        sl_int = 1_000_000 - direction * 50_000
+        fib_target_int = 1_000_000 + direction * 5_000_000
+        volume_steps = 1
+
+    ex.place(_Intent())
+    prev = ex.sl_int
+    for target in targets:
+        ex._advance_sl_to(target)
+        cur = ex.sl_int
+        assert ex._profit_side(cur, prev) >= 0
+        prev = cur
 
 
 # ---------------------------------------------------------------------------

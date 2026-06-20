@@ -1,14 +1,16 @@
 """smc_bos 分析層: BOS(Break of Structure) + EMA80フィルタ・シグナル
-(L2 / 段階S2 / spec.md §2・§5.1)。
+(L2 / 段階S2〜S4 / spec.md §2・§5.1)。
 
 直近の確定スイングを確定足終値がブレイク(BOS)し、かつ EMA80 に対して
 順行側にあるときのみ、成行参入プランを1件出す。Narrow Focus のような
 多段コンフルエンスは課さない(構造ブレイク+1本のEMAという少パラメータ
 設計。spec.md §2)。
 
-出力契約は TradingLoop が消費する `ProviderOutput`/`TradePlan`(分析層の
-共通I/O語彙。strategies/narrow_focus/signals.py に定義、market_tpsl と同じく
-流用)。Narrow Focus 固有フィールド(w1_high_int 等)は中立値で埋める。
+出力契約は `SmcOutput`/`TradePlan`(smc_bos/signals.py。`TradePlan` は
+narrow_focus/signals.py の共通語彙を market_tpsl と同じく流用)。Narrow Focus
+固有フィールド(w1_high_int 等)は中立値で埋める。`SmcOutput.swing_high_int`/
+`swing_low_int` は `SmcExecution.on_bar` への管理シグナル(`be_mode=structure`
+のSL前進トリガー。spec.md §3.3)として毎確定足の最新値を渡す。
 
 単一ポジション制約(spec.md §2.5)は、本プロバイダが自身の発行したプランの
 固定SL/TPを確定足ごとに自己追跡(ミラー)し、ミラー上で建玉中とみなす間は
@@ -26,7 +28,8 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from infers.ai.gateway import JudgementKind, JudgementRequest
 from infers.core.models import Candle, Timeframe
 from infers.indicators import ATR, EMA
-from infers.strategies.narrow_focus.signals import ProviderOutput, TradePlan
+from infers.strategies.narrow_focus.signals import TradePlan
+from infers.strategies.smc_bos.signals import SmcOutput
 from infers.strategies.smc_bos.structure import SwingDetector, bos_direction
 
 _FAR_FUTURE = datetime(2999, 1, 1, tzinfo=timezone.utc)
@@ -89,9 +92,7 @@ class SmcBosProvider:
         self._swing_low: int | None = None
         self._position: _PositionMirror | None = None
 
-    def on_candle(self, candle: Candle) -> ProviderOutput:
-        out = ProviderOutput()
-
+    def on_candle(self, candle: Candle) -> SmcOutput:
         ema_val = self._ema.update(candle.c_int)
         atr_val = self._atr.update(candle.h_int, candle.l_int, candle.c_int)
         for swing in self._swings.update(candle):
@@ -99,6 +100,9 @@ class SmcBosProvider:
                 self._swing_high = swing.price_int
             else:
                 self._swing_low = swing.price_int
+
+        # be_mode=structure のSL前進シグナル: どの早期return経路でも最新値を渡す。
+        out = SmcOutput(swing_high_int=self._swing_high, swing_low_int=self._swing_low)
 
         # 単一ポジション制約: ミラー上で建玉中ならまずTP/SL到達を判定し
         # フラットへ戻す(段階S2はSL前進が無いため固定値の到達判定のみ)。

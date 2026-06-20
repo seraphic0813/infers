@@ -1,9 +1,10 @@
 # M30 SMC BOS + EMA80 手法 仕様書(`smc_bos`)
 
-> **ステータス: 実装中(S0〜S3完了)** — 2026-06-20 起案・同日 S0〜S3 完了。
+> **ステータス: 実装中(S0〜S4完了)** — 2026-06-20 起案・同日 S0〜S4 完了。
 > 本書は INFERS プラットフォームに3つ目の手法 `smc_bos` を組み込むための設計文書。
-> M30+EMA80の前提整備(S0)・パススルー・ゲート(S1)・手法本体(S2)・M30実データでの初回検証(S3)が完了し、
-> 残るは §11 の論点(`be_mode` 既定・RR最適化等)を詰めながらの S4(SL前進)以降。進捗は §10 参照。
+> M30+EMA80の前提整備(S0)・パススルー・ゲート(S1)・手法本体(S2)・M30実データでの初回検証(S3)・
+> SL前進実装+実測比較(S4)が完了。`be_mode` 既定は実測データに基づき `off` で確定(§3.3)。
+> 残るは §11 の論点(RR最適化等)を詰めながらの S5(任意拡張)以降。進捗は §10 参照。
 >
 > **本書の位置づけ(文書優先順位)**:
 > - プラットフォーム全体の正は [phase2-architecture.md](../../../../docs/phase2-architecture.md)(6層化・手法/執行抽象)。
@@ -16,7 +17,7 @@
 
 - **何を足すか**: XAUUSD M30 の Smart Money Concepts。**BOS(Break of Structure)** を中心に **EMA80** でトレンド方向を確認し、構造ブレイクの瞬間に成行参入する手法。Narrow Focus(多段コンフルエンス+指値打診+半利+ランナー)とも market_tpsl(SMAクロス+固定TP/SL)とも別の、3つ目の独立手法。
 - **なぜ足すか**: 出典(ForexFloor の4年2ヶ月バックテスト)で PF 2.55・Sharpe 4.58 と報告される実績派。低勝率(44.5%)を高RRで補う構造ベース戦略で、パラメータが少なくオーバーフィットしにくいとされる。プラットフォームが「執行ライフサイクルの異なる手法を載せ替えられる」ことの2例目の実証にもなる。
-- **実装の核**: `strategies/smc_bos/`(`provider.py` = BOS+EMA80 シグナル / `execution.py` = 成行+構造ベースSL前進+RR利確の `SmcExecution`)+ レジストリ1行登録。
+- **実装の核**: `strategies/smc_bos/`(`provider.py` = BOS+EMA80 シグナル / `execution.py` = 成行+固定RR利確の `SmcExecution`(SL前進`be_mode`はopt-in、既定`off`。実測で最良だった構成))+ レジストリ1行登録。
 - **着手前に解消が必要な4つの前提(本書 §5.6 / §5.3 / §5.7 / §3.3 で詳述)**:
   1. **M30 が `Timeframe` enum に無い** → L0 `core/models.py` に追加(加算的・安全)。
   2. **EMA インジケーターが無い**(L1 は SMA/ATR/RSI のみ)→ `indicators/ema.py` を新設。EMA は SMA と別物。
@@ -121,13 +122,23 @@ CLAUDE.md §A の安全原則は**全手法に無条件で強制**される。SM
 
 本手法は以下の SL前進モードを持つ(`be_mode` で選択):
 
-- **`be_mode=at_1r`(原典準拠・既定候補)**: 含み益が初期リスク幅(1R = `|エントリー − 初期SL|`)に達した確定足で、SL を**建値(エントリー価格)**へ移動する。出典「1:1到達でBE」をそのまま実装する SMC の手法固有契約。
-  - **A-3(SL単調性)順守**: 建値はエントリー価格 = 初期SLより必ず利益方向にあるため、移動は常に利益方向。`SLMonotonicGuard` が物理的に強制(逆方向移動は例外送出)。
+- **`be_mode=off`(既定。段階S4で確定)**: SL前進なし。固定SL+固定TPのみ(market_tpsl 同等)。
+- **`be_mode=at_1r`(原典準拠・opt-in)**: 含み益が初期リスク幅(1R = `|エントリー − 初期SL|`)に達した確定足で、SL を**建値(実約定価格)**へ移動する。出典「1:1到達でBE」をそのまま実装する SMC の手法固有契約。
+  - **A-3(SL単調性)順守**: 建値は初期SLより必ず利益方向にあるため、移動は常に利益方向(`_advance_sl_to` が改善のみ許可)。
   - **トリガー = 含み益(1R)**: これは §A-4 改訂により SMC の契約として明示的に許可された(CLAUDE.md A-4。Narrow Focus はこの自由を使わない)。判定は含み益額/pips ではなく**確定足の高値(ロング)/安値(ショート)が 1R 価格水準へ到達したか**で行う(確定足主義 §A-2。実装上は価格比較であり PnL 評価ではない)。
-- **`be_mode=structure`(代替・構造ベース)**: トレード方向に新しい確定スイングが形成されたら SL をその保護スイングへ前進(Narrow Focus と同型の構造駆動)。含み益トリガーを避けたい場合の選択肢。A-3 順守。
-- **`be_mode=off`(段階1の最小実装)**: SL前進なし。固定SL+固定TPのみ(market_tpsl 同等)。再現性検証のベースライン。
+- **`be_mode=structure`(代替・構造ベース・opt-in)**: トレード方向に新しい確定スイングが形成されたら SL をその保護スイングへ前進(Narrow Focus と同型の構造駆動)。含み益トリガーを避けたい場合の選択肢。A-3 順守。
 
-> **実装段階**: 段階1(S2)は `be_mode=off` で素の挙動を確認 → 段階(S4)で `be_mode=at_1r`(原典準拠)を有効化し、`structure`/`off` と再現バックテストで比較する(§11-論点C)。
+> **段階S4 実測結果(2026-06-20、XAUUSD M30・5年・スワップ込み)**: 3モードを同一データで比較した結果、**`off` が PF・純益のいずれでも `at_1r`/`structure` を一貫して上回った**。`at_1r` は出典準拠だが全指標で `off` に劣後(支配される関係)。`structure` は勝率・DDは改善するが PF が1.04まで低下し5年純益がほぼゼロ。
+
+| be_mode | トレード数 | PF | 勝率 | be_sl_exit_rate | 最大DD | 純益(5年) |
+|---|---|---|---|---|---|---|
+| **off**(既定) | 197 | **1.456322103** | 31.98% | 0% | $911.78 | **+$4,258.48** |
+| at_1r | 197 | 1.383701289 | 20.81% | 5.08% | $1,027.92 | +$2,339.68 |
+| structure | 197 | 1.042033434 | 41.12% | 36.55% | $843.42 | +$144.88 |
+
+**読み方**: `at_1r`(早期建値化)は「勝ちトレードを伸ばす前に引き上げる」副作用で win_rate・PF・純益のすべてを悪化させた。これは Narrow Focus の entry-methodology.md が含み益トリガーのSL移動を**そもそも禁じている理由**(「含み益が出た瞬間に建値SLにするとノイズに狩られる」)と同質の現象が SMC(別ロジックの手法・別TF)でも再現されたことを示す。`structure` は対称的に「保護が遅すぎて伸ばせる場面でも稀に深く戻される」側に振れた可能性があるが未検証(仮説)。
+
+**判定: `be_mode=off` を実装上の既定とする。`at_1r`/`structure` は出典準拠・代替アプローチとして実装・テストは維持するが opt-in。** 詳細は `reports/README.md`「smc_bos」節 実験(2026-06-20)。
 
 ### 3.4 執行ライフサイクル(`SmcExecution` 状態機械)
 
@@ -162,10 +173,10 @@ IDLE ──place()──▶ OPEN ──(1R到達 or 新スイング確定: be_mo
 
 - クラス `SmcBosProvider`(`SignalProvider` を構造的に充足: `on_candle(candle) -> ProviderOutput`)。
 - 内部に EMA80(L1)・ATR(L1)・スイング/BOS検出器(§5.4)を保持。
-- 出力は既存の共通語彙 `ProviderOutput` / `TradePlan`(`strategies/narrow_focus/signals.py`。market_tpsl と同じく流用)。Narrow Focus 固有フィールドは中立値で埋める:
+- 出力は `SmcOutput`(`strategies/smc_bos/signals.py`。段階S4で確定)。`plans: list[TradePlan]` は narrow_focus/signals.py の共通語彙を market_tpsl と同じく流用し、Narrow Focus 固有フィールドは中立値で埋める:
   - 使うフィールド: `direction` / `limit_price_int`(=終値)/ `volume_steps` / `sl_int`(初期SL)/ `fib_target_int`(=固定TP として流用)/ `expiry`(=遠未来)/ `invalidation_price`(=初期SL)。
   - 未使用: `w1_high_int=0` / `add_volume_steps=0` / `cluster_score`・`ambiguity` は中立値(ゲート tier 判定を通すためのプレースホルダ)。
-  - `be_mode=structure` のSL前進に必要な「新スイング情報」は `ProviderOutput` の手法固有ペイロードとして渡す(§5.4・§11-論点D)。
+  - `SmcOutput.swing_high_int`/`swing_low_int` は `be_mode=structure` のSL前進に必要な「新スイング情報」(毎確定足の最新値。`narrow_focus.signals.ProviderOutput` は再利用しない — Narrow Focus 固有語彙[`structure_events`等]を持つため。L0は `output.plans` のみをduck-typingで読み `signal` は不透明に扱うので型の流用は不要)。
 - `request`: `JudgementRequest(kind=ENTRY_GATE, features={"strategy":"smc_bos", ...})`。ただし下記 §5.7 のとおり、この request は SMC では実質パススルー対象。
 
 ### 5.2 執行層 `execution.py`(L2)
@@ -243,11 +254,11 @@ register(StrategySpec(
 |---|---|---|
 | **A(全手法共通・絶対)** | A-1 防御はLLM非依存 | ✅ execution は LLM 非依存 |
 | | A-2 確定足主義 | ✅ BOS/EMA/出口すべて確定足クローズで判定 |
-| | A-3 SL単調性 | ✅ SL前進は利益方向のみ。`SLMonotonicGuard` 経由 |
-| | A-4 防御トリガー種別は手法契約 | ✅ §A-4 改訂で手法スコープ化。SMC は**原典どおり含み益(1R)トリガー BE を採用**(`be_mode=at_1r`、§3.3)。A-3 のみ全手法強制で、それは順守 |
+| | A-3 SL単調性 | ✅ SL前進は利益方向のみ。`_advance_sl_to` が改善のみ許可(プロパティテスト済み) |
+| | A-4 防御トリガー種別は手法契約 | ✅ §A-4 改訂で手法スコープ化。SMC は**含み益(1R)トリガーBEを自手法の契約として実装可能**(`be_mode=at_1r`、opt-in)だが、実測(§3.3)で `off`(既定)に劣後したため既定では使わない。A-3 のみ全手法強制で、それは順守 |
 | | A-5 float禁止 | ✅ 価格は `*_int`、EMA/ATR は量子化 Decimal |
 | | A-6 UTC固定 | ✅ Candle が強制 |
-| | A-7 スキーマ固定 | ✅ `ProviderOutput`/`TradePlan`/frozen dataclass |
+| | A-7 スキーマ固定 | ✅ `SmcOutput`/`TradePlan`/frozen dataclass |
 | | A-8 Enum一本のFSM | ✅ `SmcState`(IDLE/OPEN/CLOSED) |
 | | A-9 冪等性 | ✅ 決定論 `client_order_id` |
 | | A-10 イベントソーシング | ✅ 判断を journal へ記録(loop/execution 既存経路) |
@@ -273,11 +284,11 @@ register(StrategySpec(
 | `atr_sl_mult` | 1.5 | SL下限の ATR 倍率(出典 ATR_Mult_SL) |
 | `rr_target` | 3.0 | 固定RR(出典は 2.5〜3.0 / 5:1 と揺れ。要最適化) |
 | `exit_mode` | fixed_rr | 固定RR利確。代替: `trailing`(段階2) |
-| `be_mode` | at_1r | SL前進トリガー。`at_1r`=含み益1Rで建値化(原典準拠)/ `structure`=新スイングで前進 / `off`=前進なし |
+| `be_mode` | **off**(段階S4実測で確定) | SL前進トリガー。`off`=前進なし(既定) / `at_1r`=含み益1Rで建値化(原典準拠・opt-in) / `structure`=新スイングで前進(opt-in)。実測比較は §3.3 |
 | `volume_steps` | 2 | 固定ロット時の建玉(リスク%指定時は VolumeSizer が上書き) |
 | `max_spread_ticks` | (RiskManager 既定) | スプレッド異常拒否(金はスプレッド影響大) |
 
-> 段階1は最小構成(`be_mode=off`・`exit_mode=fixed_rr`・`sl_mode=structure`)から始め、再現バックテストで段階的に有効化する。
+> 段階S2は `be_mode=off`・`exit_mode=fixed_rr`・`sl_mode=structure` の最小構成から開始し、段階S4で `at_1r`/`structure` を実装・実測した結果、`off` を既定として確定した(§3.3)。
 
 ---
 
@@ -315,7 +326,7 @@ register(StrategySpec(
 | **S1** | パススルー・ゲート(案A: `--ai-client none`)を CLI/gateway に追加。手法非依存・防御層不変 | 低〜中 | **完了**(2026-06-20。`infers/ai/passthrough.py` + `test_passthrough.py`。depth50 ビット一致再確認済み) |
 | **S2** | `strategies/smc_bos/` 実装(`structure.py`/`provider.py`/`execution.py`)。`be_mode=off`・`fixed_rr` の最小構成。レジストリ登録。単体+結合テスト | 中 | **完了**(2026-06-20。`SwingDetector`/`bos_direction`/`SmcBosProvider`/`SmcExecution`。単体30件(プロパティ1件含む)+ `--strategy smc_bos`のCLI解決確認。depth50 ビット一致再確認済み) |
 | **S3** | XAUUSD M30 データ export → 全期間バックテスト → `reports/smc_bos_full/`。出典との乖離分析 | 低(データ依存) | **完了**(2026-06-20。`data/xauusd_m30.parquet`(5年・59,142本)をMT5から取得。PF1.456/197トレード/DD$911.78/勝率31.98%。出典PF2.55は未再現だが優位性は確認。詳細は §1 追記・`reports/README.md`) |
-| **S4** | `be_mode=structure`(構造SL前進)実装 + SL単調性プロパティテスト。再検証 | 中 | 未着手 |
+| **S4** | `be_mode=at_1r`/`structure`(SL前進)実装 + SL単調性プロパティテスト。再検証 | 中 | **完了**(2026-06-20。`SmcOutput`新設(signals.py)・`_advance_sl_to`(no-op式・例外なし)。単体11件追加(プロパティ1件含む)。実測比較で `off`(既定)が `at_1r`/`structure` を一貫して上回り、`be_mode` 既定を `off` で確定。`at_1r`/`structure` は実装・テスト済みのopt-in。詳細 §3.3) |
 | **S5(任意)** | HTF バイアス / CHoCH / トレーリング / ニュース・セッションフィルタ | 中 | 未着手 |
 
 各段階末で「depth50 ビット一致 + pytest 全合格」を再確認してからコミット(CLAUDE.md 定石5)。
@@ -326,8 +337,8 @@ register(StrategySpec(
 
 - **論点A(ゲート方針)**: §5.7 の案A(手法非依存パススルーゲート `--ai-client none`)で進めてよいか。**推奨: 案A**(最小・手法非依存・防御層不変。phase2 の積み残しを CLI 化)。
 - **論点B(RR目標)**: `rr_target` 既定を 3.0 とし、再現バックテストで 2.5/3.0/5.0 を比較最適化する方針でよいか。出典が値を揺らしているため固定値の盲信はしない。**推奨: 3.0 開始で最適化**。
-- **論点C(BE 方針)**: ~~A-4 抵触のため翻訳~~ → **解決済み**。§A-4 の手法スコープ化により、SMC は**原典どおり `be_mode=at_1r`(含み益1Rで建値化)を自手法契約として採用**(§3.3)。段階1(S2)は `be_mode=off` で素の挙動を確認し、S4 で `at_1r` を有効化、`structure`/`off` と再現バックテストで比較する。**残る確認は「at_1r を既定とするか、それとも off/structure を既定にして at_1r は opt-in にするか」のみ**(推奨: 原典忠実のため `at_1r` を既定候補)。
-- **論点D(管理シグナルの受け渡し)**: 構造SL前進に必要な「新スイング情報」を `ProviderOutput` の手法固有ペイロードとして `on_bar(candle, signal)` へ渡す形(provider と execution が同手法内で型を共有。phase2 §8-1 と同じ前提)でよいか。**推奨: 可**。
+- **論点C(BE 方針)**: ~~A-4 抵触のため翻訳~~ → **解決済み(2026-06-20、段階S4実測)**。`be_mode=at_1r`/`structure` を実装し XAUUSD M30・5年で実測した結果、**`off`(SL前進なし)が PF・純益のいずれでも一貫して上回った**(PF1.456 vs 1.384/1.042)。原典忠実性より実測結果を優先し、**`off` を既定として確定**。`at_1r`(原典準拠)・`structure` は実装・テストとも完備した opt-in として残置(将来パラメータ最適化や他シンボルでの再評価に備える)。詳細 §3.3。
+- **論点D(管理シグナルの受け渡し)**: ~~構造SL前進に必要な「新スイング情報」を `ProviderOutput` の手法固有ペイロードとして渡す形でよいか~~ → **解決済み**。`ProviderOutput`(Narrow Focus 固有語彙)は再利用せず、`strategies/smc_bos/signals.py` に専用の `SmcOutput`(`plans` + `swing_high_int`/`swing_low_int`)を新設して渡す形で実装(§5.1)。L2→L2 の不要な型結合を増やさない選択。
 - **論点E(構造検出の置き場所)**: 段階1は手法フォルダ自前実装(§5.4)。L1 昇格は将来課題。**推奨: 自前実装で開始**。
 - **論点F(手法名)**: `smc_bos` で確定してよいか(TF はパラメータなので名前に含めない)。代替 `m30_smc` 等。**推奨: `smc_bos`**。
 
@@ -337,7 +348,7 @@ register(StrategySpec(
 
 depth50 が原典 Narrow Focus に「システム化のための追加/解釈」を加えたのと同様、SMC も本プラットフォームの不変条件に合わせて以下を**意図的に変更**する。再現性検証はこの差異を前提に評価する:
 
-1. ~~建値化(BE)~~ **差異は解消**: §A-4 の手法スコープ化により「1:1到達でBE」を**原典どおり実装可能**(`be_mode=at_1r`)。判定は含み益額ではなく確定足の価格水準到達で行う点のみ実装上の差(挙動は等価。§A-2 確定足主義)。A-3(SL単調性)は順守。
+1. **建値化(BE)**: §A-4 の手法スコープ化により「1:1到達でBE」は**原典どおり実装可能**(`be_mode=at_1r`、判定は確定足の価格水準到達で行う。挙動は等価)だが、**実装後の実測(段階S4)で `off`(SL前進なし)に劣後したため既定では使わない**(`at_1r` はopt-in)。原典忠実性より実証結果を優先した意図的な差異。
 2. **スイング検出**: 出典EA の単純 N本前 high/low → **確定遅延つきピボット**(ダマシ/リペイント排除、§A-2)。
 3. **AIゲート**: SMC は LLM/ルールゲートを通さず**パススルー**(意味的に不要。防御層は別途強制)。
 4. **エントリー約定**: 形成中バーのヒゲ抜けでなく**確定足終値**でのBOS判定(§A-2)。
