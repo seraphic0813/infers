@@ -217,15 +217,14 @@ register(StrategySpec(
 - 対応: enum に `M30 = "M30"` を、`_DURATIONS` に `Timeframe.M30: timedelta(minutes=30)` を追加(**加算的・後方互換**)。これは L0 への変更だが、既存値に触れないため depth50 のビット一致を脅かさない。
 - データ export(`--mode export --tf M30`)・feed・確定足判定が M30 を受けられることを確認する(`tf.duration` 経由のため自動対応の見込み。テストで確認)。
 
-### 5.7 AIゲート結合の扱い(**要対応**)
+### 5.7 AIゲート結合の扱い(**S1 で解消済み・2026-06-20**)
 
-- **問題**: `TradingLoop.on_candle` は全プランに `gateway.judge(plan.request, ...)` を強制する。既定の `RuleBasedLlmClient` は **Narrow Focus 固有特徴量**(`dow_state`/`w1_high`/`rsi_band`/`families`…)を `judge_features` で参照するため、SMC の features では `KeyError` → `_resolve` の例外捕捉で **GUARDRAIL NO_GO**。結果、SMC は現状**1トレードも約定できない**(market_tpsl で実証済みの既知制約。phase2 §段階2.5)。
+- **問題**: `TradingLoop.on_candle` は全プランに `gateway.judge(plan.request, ...)` を強制する。既定の `RuleBasedLlmClient` は **Narrow Focus 固有特徴量**(`dow_state`/`w1_high`/`rsi_band`/`families`…)を `judge_features` で参照するため、SMC の features では `KeyError` → `_resolve` の例外捕捉で **GUARDRAIL NO_GO**。結果、SMC は実装前は**1トレードも約定できない**(market_tpsl で実証済みの既知制約。phase2 §段階2.5)。
 - **SMC は本来 LLM/ルールゲートを必要としない**: エントリー判定(BOS確定 + EMA80)は provider 内で完結する決定論ゲートそのもの。LLMゲートは Narrow Focus のコンフルエンス審査用であり、SMC には意味的に不要。防御層(SL単調・冪等・リスク拒否権)は別途すべての手法に強制され続ける(これは「約定可否」の問題であって安全性の問題ではない。phase2 §段階2.5 と同じ整理)。
-- **推奨対応(本書の提案)**: **手法非依存のパススルー・ゲート**を用意する。
-  - 案A(推奨): `--ai-client none`(または `--gate passthrough`)を新設し、常に GO を返す `PassthroughLlmClient`(+全件 L1_ONLY に落とす policy)を配線。**どの手法でも**ゲートを意味的に無効化でき、SMC/market_tpsl の素の執行をバックテストできる。防御層は不変。小さな手法非依存の追加で、phase2 が積み残した「寛容ゲート」を CLI に正式化する位置づけ。
-  - 案B: ゲートを手法-aware に一般化(provider がゲートの要否・特徴量を宣言)。phase2 が「フェーズ3課題」とした本筋だが大改修。本手法導入のスコープ外。
-  - 案C: SMC features を無理に Narrow Focus 形へ詰めて既存ルールゲートを通す。意味的に破綻するため**不採用**。
-- 段階1の結合検証は market_tpsl 同様、**寛容ゲート注入の統合テスト**で `SmcExecution` がエントリー→TP/SL決済まで成立することを確認する。CLI バックテストは案A実装後に通す。
+- **対応(案A・実装済み)**: `--ai-client none` を新設し、常に GO を返す `infers.ai.passthrough.PassthroughLlmClient` + 全件 `Tier.L1_ONLY` に落とす `PASSTHROUGH_POLICY` を `main._build_gateway` に配線(`tests/test_passthrough.py`)。**どの手法でも**ゲートを意味的に無効化でき、SMC/market_tpsl の素の執行をバックテストできる。防御層は不変。CLI実証: `--strategy market_tpsl --ai-client none --last 3m` で414トレード・全件 `L1:GO`(GUARDRAIL無し)を確認。
+  - 案B(ゲートを手法-aware に一般化。provider がゲートの要否・特徴量を宣言)は phase2 が「フェーズ3課題」とした本筋だが大改修のため不採用(本手法導入のスコープ外)。
+  - 案C(SMC features を無理に Narrow Focus 形へ詰めて既存ルールゲートを通す)は意味的に破綻するため不採用。
+- S2 の結合検証は `--ai-client none` 経由(`AiGateway` 実体を使う。market_tpsl の `_GoGateway` 手書きスタブより高忠実度)で `SmcExecution` がエントリー→TP/SL決済まで成立することを確認する。
 
 ---
 
@@ -301,14 +300,14 @@ register(StrategySpec(
 
 ## 10. 段階的実装計画(案)
 
-| 段階 | 内容 | リスク |
-|---|---|---|
-| **S0** | 前提整備: `Timeframe.M30` 追加(L0)+ `indicators/ema.py` 新設(L1)+ 単体テスト。depth50 ビット一致確認 | 低(加算的) |
-| **S1** | パススルー・ゲート(案A: `--ai-client none`)を CLI/gateway に追加。手法非依存・防御層不変 | 低〜中 |
-| **S2** | `strategies/smc_bos/` 実装(`structure.py`/`provider.py`/`execution.py`)。`be_mode=off`・`fixed_rr` の最小構成。レジストリ登録。単体+結合テスト | 中 |
-| **S3** | XAUUSD M30 データ export → 全期間バックテスト → `reports/smc_bos_full/`。出典との乖離分析 | 低(データ依存) |
-| **S4** | `be_mode=structure`(構造SL前進)実装 + SL単調性プロパティテスト。再検証 | 中 |
-| **S5(任意)** | HTF バイアス / CHoCH / トレーリング / ニュース・セッションフィルタ | 中 |
+| 段階 | 内容 | リスク | 状態 |
+|---|---|---|---|
+| **S0** | 前提整備: `Timeframe.M30` 追加(L0)+ `indicators/ema.py` 新設(L1)+ 単体テスト。depth50 ビット一致確認 | 低(加算的) | **完了**(2026-06-20。[PR #1](https://github.com/seraphic0813/infers/pull/1)) |
+| **S1** | パススルー・ゲート(案A: `--ai-client none`)を CLI/gateway に追加。手法非依存・防御層不変 | 低〜中 | **完了**(2026-06-20。`infers/ai/passthrough.py` + `test_passthrough.py`。depth50 ビット一致再確認済み) |
+| **S2** | `strategies/smc_bos/` 実装(`structure.py`/`provider.py`/`execution.py`)。`be_mode=off`・`fixed_rr` の最小構成。レジストリ登録。単体+結合テスト | 中 | 未着手 |
+| **S3** | XAUUSD M30 データ export → 全期間バックテスト → `reports/smc_bos_full/`。出典との乖離分析 | 低(データ依存) | 未着手 |
+| **S4** | `be_mode=structure`(構造SL前進)実装 + SL単調性プロパティテスト。再検証 | 中 | 未着手 |
+| **S5(任意)** | HTF バイアス / CHoCH / トレーリング / ニュース・セッションフィルタ | 中 | 未着手 |
 
 各段階末で「depth50 ビット一致 + pytest 全合格」を再確認してからコミット(CLAUDE.md 定石5)。
 

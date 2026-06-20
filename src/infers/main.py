@@ -165,10 +165,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "フラグ(--depth-max 等)を無視し、レジストリ登録済みの構成を"
                         "そのまま使う。省略時は従来のフラグ組み立て経路(挙動不変)")
     p.add_argument("--verdict-cache", default="work/cache/verdicts.sqlite3")
-    p.add_argument("--ai-client", choices=["rule", "claude"], default="rule",
+    p.add_argument("--ai-client", choices=["rule", "claude", "none"], default="rule",
                    help="エントリーゲートの判定方式。既定は rule_judge.py の"
                         "決定論ルール ($0, narrow_focus_v3.md §5 実装)。"
-                        "claude は旧Claude L1/L2ゲート (Batches API 経由)")
+                        "claude は旧Claude L1/L2ゲート (Batches API 経由)。"
+                        "none は手法非依存のパススルー(常時GO。Narrow Focus 固有特徴量"
+                        "を前提としない別手法 — market_tpsl/smc_bos 等 — のバックテスト用。"
+                        "防御層は不変。spec.md §5.7 案A)")
     p.add_argument("--system-prompt-file", help="LLM用システムプロンプト (凍結ファイル)")
     p.add_argument("--years", type=int, default=5, help="export: 取得年数")
     # 2パスバックテスト (judge = Pass1 / replay = Pass2。CLAUDE.md 第16条)
@@ -323,11 +326,18 @@ def _build_gateway(args: argparse.Namespace, *, cache_only: bool) -> AiGateway:
     決定論実装、$0・同期呼び出し可)。`--ai-client claude` で旧LLMゲートに
     切替可能 — その場合 cache_only=True (backtest/replay) では LLM
     クライアントを配線しない (CLAUDE.md 第16条: 同期ループ内で
-    messages.create を呼ばない)。"""
+    messages.create を呼ばない)。`--ai-client none` は手法非依存のパススルー
+    (spec.md §5.7 案A。market_tpsl/smc_bos 等、Narrow Focus 固有特徴量を
+    前提としない手法のバックテスト用。$0・同期呼び出し可なので cache_only
+    に関わらず常時利用可能)。"""
     if args.ai_client == "claude":
         client = CacheOnlyClient() if cache_only else AnthropicLlmClient(
             _load_system_prompt(args))
         policy = DEFAULT_POLICY
+    elif args.ai_client == "none":
+        from infers.ai.passthrough import PASSTHROUGH_POLICY, PassthroughLlmClient
+        client = PassthroughLlmClient()
+        policy = PASSTHROUGH_POLICY
     else:
         client = RuleBasedLlmClient()
         policy = RULE_POLICY
