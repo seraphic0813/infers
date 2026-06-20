@@ -1,8 +1,9 @@
 # M30 SMC BOS + EMA80 手法 仕様書(`smc_bos`)
 
-> **ステータス: ドラフト(レビュー待ち)** — 2026-06-20 起案。
-> 本書は INFERS プラットフォームに3つ目の手法 `smc_bos` を組み込むための設計合意用の叩き台。
-> 合意後に確定し、実装(provider / execution / レジストリ登録 / 新規インジケーター)へ移る。
+> **ステータス: 実装中(S0〜S3完了)** — 2026-06-20 起案・同日 S0〜S3 完了。
+> 本書は INFERS プラットフォームに3つ目の手法 `smc_bos` を組み込むための設計文書。
+> M30+EMA80の前提整備(S0)・パススルー・ゲート(S1)・手法本体(S2)・M30実データでの初回検証(S3)が完了し、
+> 残るは §11 の論点(`be_mode` 既定・RR最適化等)を詰めながらの S4(SL前進)以降。進捗は §10 参照。
 >
 > **本書の位置づけ(文書優先順位)**:
 > - プラットフォーム全体の正は [phase2-architecture.md](../../../../docs/phase2-architecture.md)(6層化・手法/執行抽象)。
@@ -41,6 +42,14 @@
 | 複利例 | $5,000 → $4.2M超(84,277%、リスク管理前提) |
 
 > **免責**: 上記はすべて**外部ブログの自己申告値**であり、当方で再現・検証していない。DD 37% は実運用では極めて重く、**本数値は実装後に自前バックテスト(`reports/smc_bos_full/`)で再検証するまで「目標」ではなく「出典の主張」として扱う**(本プロジェクトの depth50 が出典PF3.92→実測1.07だった前例がある)。複利・実口座運用は本書のスコープ外(デモ検証必須)。
+
+> **段階S3 初回実測(2026-06-20、`reports/smc_bos_full/`)**: XAUUSD M30・5年(2021-06〜2026-06・
+> 59,142本、MT5 Vantage Trading Demoから取得)・段階S2構成(`be_mode=off`・既定パラメータ・
+> `--ai-client none`)で実測した結果、**トレード数197・PF 1.456322103・勝率31.98%・最大DD$911.78・
+> 純益+$4,258.48(5年/固定2step)**。出典主張(PF2.55・勝率44.5%・391トレード)を**下回るが
+> depth50ほど劇的な乖離(3.92→1.07)ではない**。乖離要因はスイング検出方式の違い・単一ポジション
+> 制約の実装(自己ミラー追跡)・`be_mode=off`(出典の1R建値化が未実装)等と推測(未検証の仮説)。
+> 詳細は `reports/README.md` 「smc_bos (3つ目の手法・別TF)」節。
 
 ---
 
@@ -305,7 +314,7 @@ register(StrategySpec(
 | **S0** | 前提整備: `Timeframe.M30` 追加(L0)+ `indicators/ema.py` 新設(L1)+ 単体テスト。depth50 ビット一致確認 | 低(加算的) | **完了**(2026-06-20。[PR #1](https://github.com/seraphic0813/infers/pull/1)) |
 | **S1** | パススルー・ゲート(案A: `--ai-client none`)を CLI/gateway に追加。手法非依存・防御層不変 | 低〜中 | **完了**(2026-06-20。`infers/ai/passthrough.py` + `test_passthrough.py`。depth50 ビット一致再確認済み) |
 | **S2** | `strategies/smc_bos/` 実装(`structure.py`/`provider.py`/`execution.py`)。`be_mode=off`・`fixed_rr` の最小構成。レジストリ登録。単体+結合テスト | 中 | **完了**(2026-06-20。`SwingDetector`/`bos_direction`/`SmcBosProvider`/`SmcExecution`。単体30件(プロパティ1件含む)+ `--strategy smc_bos`のCLI解決確認。depth50 ビット一致再確認済み) |
-| **S3** | XAUUSD M30 データ export → 全期間バックテスト → `reports/smc_bos_full/`。出典との乖離分析 | 低(データ依存) | 未着手 |
+| **S3** | XAUUSD M30 データ export → 全期間バックテスト → `reports/smc_bos_full/`。出典との乖離分析 | 低(データ依存) | **完了**(2026-06-20。`data/xauusd_m30.parquet`(5年・59,142本)をMT5から取得。PF1.456/197トレード/DD$911.78/勝率31.98%。出典PF2.55は未再現だが優位性は確認。詳細は §1 追記・`reports/README.md`) |
 | **S4** | `be_mode=structure`(構造SL前進)実装 + SL単調性プロパティテスト。再検証 | 中 | 未着手 |
 | **S5(任意)** | HTF バイアス / CHoCH / トレーリング / ニュース・セッションフィルタ | 中 | 未着手 |
 
