@@ -192,6 +192,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--report", metavar="DIR",
                    help="backtest: HTMLレポート出力ディレクトリ "
                         "(report.html + report_data.js を生成)")
+    # 期間スライス (段階2.4: フルテスト/ライトテストを1データから切出し)
+    p.add_argument("--from", dest="period_from", metavar="ISO8601",
+                   help="backtest: 期間の開始(UTC、例 '2024-01-01')。"
+                        "省略時はデータ先頭から")
+    p.add_argument("--to", dest="period_to", metavar="ISO8601",
+                   help="backtest: 期間の終了(UTC、例 '2025-01-01')。"
+                        "省略時はデータ末尾まで")
+    p.add_argument("--last", dest="period_last", metavar="PERIOD",
+                   help="backtest: データ終端からの相対期間で切出し "
+                        "(例 '1y'=ライトテスト、'5y'相当はフルテスト=既定の全期間)。"
+                        "'--to' 併用時はそちらを終端とする")
     p.add_argument("--initial-capital", default="10000",
                    help="レポートの想定初期資金 USD (既定 10000)")
     p.add_argument("--contract-size", default="100",
@@ -368,6 +379,19 @@ def run_backtest(args: argparse.Namespace) -> int:
         return 2
 
     candles = load_history(args.data, tf=Timeframe(args.tf))
+    if args.period_from or args.period_to or args.period_last:
+        from infers.backtest.slicing import slice_candles
+        start = (datetime.fromisoformat(args.period_from).replace(tzinfo=timezone.utc)
+                 if args.period_from else None)
+        end = (datetime.fromisoformat(args.period_to).replace(tzinfo=timezone.utc)
+               if args.period_to else None)
+        before = len(candles)
+        candles = slice_candles(candles, start=start, end=end, last=args.period_last)
+        if not candles:
+            print("error: --from/--to/--last でデータが0本になった", file=sys.stderr)
+            return 2
+        print(f"period: {before}本 → {len(candles)}本"
+              f" ({candles[0].open_time.isoformat()} 〜 {candles[-1].open_time.isoformat()})")
     gateway = _build_gateway(args, cache_only=True)
 
     recorder = None
