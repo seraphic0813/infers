@@ -41,6 +41,7 @@ class FakeMt5:
 
     TIMEFRAME_M5 = 5
     TIMEFRAME_M15 = 15
+    TIMEFRAME_M30 = 30
     TIMEFRAME_H1 = 16385
     TIMEFRAME_H4 = 16388
     TIMEFRAME_D1 = 16408
@@ -94,6 +95,14 @@ def _make_feed(fake, **kw) -> mt5_feed.MT5Feed:
 
 def _drain(feed, stop) -> list:
     return list(feed.iter_closed(GOLD, Timeframe.M5, stop=stop))
+
+
+def test_tf_const_covers_every_timeframe():
+    """_tf_const は Timeframe 全列挙値に対応する (M30 追加の回帰防止)。"""
+    fake = FakeMt5([], [])
+    feed = _make_feed(fake)
+    for tf in Timeframe:
+        assert feed._tf_const(tf) == getattr(fake, f"TIMEFRAME_{tf.value}")
 
 
 class TestStreaming:

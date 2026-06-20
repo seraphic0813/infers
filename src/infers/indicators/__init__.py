@@ -10,7 +10,8 @@
 
 from infers.indicators._common import Q
 from infers.indicators.atr import ATR
+from infers.indicators.ema import EMA
 from infers.indicators.rsi import RsiState, WilderRSI, rsi_forward, rsi_value
 from infers.indicators.sma import SMA
 
-__all__ = ["Q", "SMA", "ATR", "RsiState", "WilderRSI", "rsi_forward", "rsi_value"]
+__all__ = ["Q", "SMA", "EMA", "ATR", "RsiState", "WilderRSI", "rsi_forward", "rsi_value"]

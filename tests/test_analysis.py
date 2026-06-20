@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 
 from infers.analysis.dow import DowStateMachine, StructureEventType, TrendState
-from infers.indicators import ATR, Q, SMA, RsiState, WilderRSI, rsi_forward
+from infers.indicators import ATR, EMA, Q, SMA, RsiState, WilderRSI, rsi_forward
 from infers.strategies.narrow_focus.zigzag import SwingPoint, ZigZagDetector
 from infers.core.models import Candle, Timeframe
 
@@ -26,7 +26,7 @@ def mk_candle(i: int, h: int, l: int, c: int | None = None, tf: Timeframe = Time
 
 
 # ---------------------------------------------------------------------------
-# SMA / ATR
+# SMA / EMA / ATR
 # ---------------------------------------------------------------------------
 
 class TestSMA:
@@ -46,6 +46,36 @@ class TestSMA:
         sma = SMA(3)
         sma.update(1); sma.update(1)
         assert sma.update(2) == Decimal("1.333333333")  # 4/3 を 1e-9 量子化
+
+
+class TestEMA:
+    """smc_bos 手法の EMA80 フィルタ用 (spec.md §5.3)。SMA でシードし以後漸化式。"""
+
+    def test_warmup_returns_none(self):
+        ema = EMA(3)
+        assert ema.update(10) is None
+        assert ema.update(20) is None
+        assert not ema.is_ready
+
+    def test_seed_is_sma_then_recurrence(self):
+        ema = EMA(3)            # k = 2/(3+1) = 0.5
+        ema.update(10); ema.update(20)
+        assert ema.update(30) == Decimal(20)            # seed = (10+20+30)/3
+        assert ema.update(40) == Decimal(30)            # 20 + 0.5*(40-20)
+        assert ema.update(40) == Decimal(35)            # 30 + 0.5*(40-30)
+
+    def test_exact_quantization(self):
+        ema = EMA(2)             # k = 2/3 (非有限小数 → 1e-9 量子化が必要)
+        ema.update(1)
+        assert ema.update(4) == Decimal("2.500000000")  # seed = (1+4)/2
+        nxt = ema.update(4)
+        # 2.5 + (2/3).quantize(Q) * (4 - 2.5) を同じ量子化規約で再計算
+        k = (Decimal(2) / 3).quantize(Q)
+        assert nxt == (Decimal("2.500000000") + k * Decimal("1.500000000")).quantize(Q)
+
+    def test_period_must_be_positive(self):
+        with pytest.raises(ValueError):
+            EMA(0)
 
 
 class TestATR:
