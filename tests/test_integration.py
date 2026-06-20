@@ -204,25 +204,27 @@ class TestLiveRunner:
         assert runner.loop.open_positions == {}
         assert broker.pending_count == 0
 
-    def test_runner_reversal_close_gated_by_config(self):
-        """ループはランナーをダウ転換で閉じるかを runner_reversal_exit で制御する
-        (entry-methodology.md ③-2: 既定はフィボ目標/建値SLのみで伸ばす)。"""
+    def test_loop_delegates_to_execution_on_bar(self):
+        """ループは既存ポジションの管理を ExecutionModel.on_bar へ完全委譲し、
+        戻り値 BarOutcome に従って失効リカバリー (expired) とクローズ回収 (closed)
+        のみを行う (段階2.3 の抽象境界。手法固有の執行手順はループに無い)。"""
+        from infers.core.execution import BarOutcome
         from infers.core.loop import TradingLoop
-        from infers.execution.sm import PosState
 
-        class StubRunner:
-            def __init__(self):
-                self.state = PosState.RUNNER
+        class StubExecution:
+            """ExecutionModel を構造的に充足する最小スタブ。"""
+            def __init__(self, outcome: BarOutcome):
+                self._outcome = outcome
+                self.bars = 0
                 self.volume_steps = 1
-                self.reversal = 0
-            def on_structure_event(self, ev): return False
-            def on_runner_target(self, candle, fib): return False
-            def on_runner_reversal(self, ev): self.reversal += 1; return False
+            def place(self, intent): ...
+            def on_broker_event(self, ev): ...
+            def on_bar(self, candle, signal) -> BarOutcome:
+                self.bars += 1
+                return self._outcome
+            def close(self, reason): ...
 
-        out = ProviderOutput(structure_events=[hl_event(1025)])
-        candle = mk_candle(0, 1005, 995, 1000)
-
-        def make_loop(flag: bool) -> TradingLoop:
+        def make_loop() -> TradingLoop:
             return TradingLoop(
                 broker=LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5),
                 gateway=AiGateway(client=FakeClient(), cache=VerdictCache(), policy=POLICY),
@@ -230,15 +232,26 @@ class TestLiveRunner:
                     max_total_volume_steps=8, max_spread_ticks=10,
                     daily_loss_limit_tick_steps=10_000)),
                 fsm_config=FsmConfig(min_be_distance_ticks=10, be_offset_ticks=2,
-                    breakout_buffer_ticks=10, runner_reversal_exit=flag))
+                    breakout_buffer_ticks=10))
 
-        off = make_loop(False); s1 = StubRunner(); off.open_positions["p"] = (s1, make_plan())
-        off.on_candle(candle, out, spread_ticks=2)
-        assert s1.reversal == 0                          # 既定: 転換でランナーを閉じない
+        candle = mk_candle(0, 1005, 995, 1000)
 
-        on = make_loop(True); s2 = StubRunner(); on.open_positions["p"] = (s2, make_plan())
-        on.on_candle(candle, out, spread_ticks=2)
-        assert s2.reversal == 1                          # 旧挙動: 転換クローズを試みる
+        # closed=True かつ expired=True: ループは sink を呼び、ポジションを回収する。
+        sink: list[str] = []
+        loop = make_loop(); loop._expiry_sink = sink.append
+        ex = StubExecution(BarOutcome(closed=True, expired=True))
+        loop.open_positions["p"] = (ex, make_plan())
+        closed = loop.on_candle(candle, ProviderOutput(), spread_ticks=2)
+        assert ex.bars == 1                              # on_bar に委譲された
+        assert sink == ["p"]                             # expired → 失効リカバリー
+        assert closed == ["p"] and "p" not in loop.open_positions  # closed → 回収
+
+        # closed=False かつ expired=False: ループは何も外形変化させない。
+        loop2 = make_loop()
+        ex2 = StubExecution(BarOutcome(closed=False, expired=False))
+        loop2.open_positions["p"] = (ex2, make_plan())
+        closed2 = loop2.on_candle(candle, ProviderOutput(), spread_ticks=2)
+        assert ex2.bars == 1 and closed2 == [] and "p" in loop2.open_positions
 
     def test_llm_panic_keeps_loop_alive(self):
         """LLM全停止でもライブループは例外なく完走し口座はフラット。"""

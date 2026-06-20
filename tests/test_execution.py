@@ -360,6 +360,43 @@ class TestLifecycle:
         assert fsm.state is PosState.CLOSED
         assert fsm.journal[-1][1]["reason"] == "DOW_REVERSAL"
 
+    def test_on_bar_runner_reversal_gated_by_config(self):
+        """on_bar (執行モデル抽象) はランナーをダウ転換で閉じるかを
+        runner_reversal_exit で制御する (段階2.3 でループから移管した判断)。"""
+        from infers.core.loop import ProviderOutput
+
+        reversal = StructureEvent(type=StructureEventType.LL, swing=sw("LOW", 1000, 11),
+                                  prev_swing=sw("LOW", 1010, 10),
+                                  state_after=TrendState.DOWN)
+        # on_bar の RUNNER 経路は plan.fib_target_int を参照するため、到達しない
+        # 高目標を持つ最小プランを注入する (フィボ目標では閉じない)。
+        class _Plan:
+            w1_high_int = 1020
+            fib_target_int = 999_999
+            add_volume_steps = 2
+
+        bar5 = mk_candle(5, 1080, 1060, 1075)
+
+        # 既定 (flag=False): ダウ転換が来てもランナーを閉じない
+        broker_off = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        fsm_off = make_runner_long(broker_off)
+        fsm_off._plan = _Plan()
+        broker_off.process_bar(bar5)
+        out_off = fsm_off.on_bar(bar5, ProviderOutput(structure_events=[reversal]))
+        assert fsm_off.state is PosState.RUNNER and out_off.closed is False
+
+        # flag=True: ダウ転換で残玉を全決済する (旧挙動)
+        cfg_on = FsmConfig(min_be_distance_ticks=10, be_offset_ticks=2,
+                           breakout_buffer_ticks=10, runner_reversal_exit=True)
+        broker_on = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        fsm_on = make_runner_long(broker_on)
+        fsm_on._cfg = cfg_on
+        fsm_on._plan = _Plan()
+        broker_on.process_bar(bar5)
+        out_on = fsm_on.on_bar(bar5, ProviderOutput(structure_events=[reversal]))
+        assert fsm_on.state is PosState.CLOSED and out_on.closed is True
+        assert fsm_on.journal[-1][1]["reason"] == "DOW_REVERSAL"
+
     def test_runner_exit_only_in_runner_state(self):
         """ランナー出口は RUNNER 状態でのみ作用 (それ以前は無視)。"""
         broker = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)

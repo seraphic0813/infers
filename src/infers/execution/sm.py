@@ -31,6 +31,7 @@ from typing import Callable, Protocol
 
 from infers.analysis.dow import StructureEvent, StructureEventType, TrendState
 from infers.analysis.support_resistance import SRZone
+from infers.core.execution import BarOutcome
 from infers.core.models import Candle
 
 
@@ -80,8 +81,14 @@ class FsmConfig:
     runner_reversal_exit: bool = False      # True で旧挙動 (M5ダウ転換でランナー即クローズ)
 
 
-class PositionFSM:
-    """1トレード試行 (打診〜終了) を管理する状態機械。
+class NarrowFocusExecution:
+    """Narrow Focus 手法の執行モデル (core.execution.ExecutionModel を構造的に充足)。
+
+    1トレード試行 (打診〜終了) を管理する有限状態機械。打診指値→第1波ブレイク
+    追撃→建値SL移動→半分利確→ランナー、という Narrow Focus 固有の執行手順を
+    内包する。TradingLoop からは抽象メソッド (place/on_broker_event/on_bar/close)
+    経由でのみ駆動され、低レベル遷移メソッド (on_wave1_break 等) は本クラス内部
+    および手法のプロパティテストからのみ呼ばれる。
 
     すべての状態遷移はジャーナル (journal) に記録される (CLAUDE.md 第11条)。
     """
@@ -108,6 +115,10 @@ class PositionFSM:
         self._invalidation_price: int | None = None
         self._limit_order_id: str | None = None
         self._add_fired: bool = False                  # 追撃は1ポジションにつき高々1回
+        # place() で受け取ったエントリー意図 (TradePlan)。on_bar が追撃トリガー
+        # (w1_high_int) と残玉目標 (fib_target_int)・追撃量を参照するため保持する。
+        # object 型で扱い L0語彙への依存を持たない (duck-typed)。
+        self._plan: object | None = None
         self.journal: list[tuple[str, dict]] = []
 
     # -- 参照 ------------------------------------------------------------------
@@ -128,6 +139,11 @@ class PositionFSM:
     @property
     def volume_steps(self) -> int:
         return self._volume_steps
+
+    @property
+    def closed(self) -> bool:
+        """終端 (CLOSED) に達したか (ExecutionModel 抽象。約定前キャンセル含む)。"""
+        return self._state is PosState.CLOSED
 
     # -- 内部ヘルパー ------------------------------------------------------------
 
@@ -444,3 +460,71 @@ class PositionFSM:
         self._volume_steps = 0
         self._state = PosState.CLOSED
         self._log("CLOSE_ALL", reason=reason)
+
+    # -- ExecutionModel 抽象 (TradingLoop が呼ぶ高レベル経路) -----------------------
+    #
+    # 以下4メソッドは core.execution.ExecutionModel を構造的に充足する。Narrow Focus
+    # 固有の執行手順 (打診→追撃→半利→ランナー) を上の低レベル遷移メソッドへ畳み込み、
+    # TradingLoop が手法固有の具象呼び出し (on_wave1_break 等) を持たないようにする。
+
+    def place(self, intent: object) -> None:
+        """エントリー意図 (TradePlan) を受けて打診指値を置く。
+
+        intent は duck-typed (limit_price_int / volume_steps / sl_int / expiry /
+        invalidation_price と、on_bar が使う w1_high_int / fib_target_int /
+        add_volume_steps を持つ)。
+        """
+        self._plan = intent
+        self.place_probe(
+            limit_price_int=intent.limit_price_int, volume_steps=intent.volume_steps,
+            sl_int=intent.sl_int, expiry=intent.expiry,
+            invalidation_price=intent.invalidation_price)
+
+    def on_broker_event(self, ev: object) -> None:
+        """ブローカーイベント (約定/SLヒット) を配送する。"""
+        if ev.kind == "FILL" and self._state is PosState.PROBE_PENDING:
+            self.on_probe_fill(ev.price_int, ev.volume_steps)
+        elif ev.kind == "SL_HIT":
+            self.on_sl_hit(ev.price_int)
+
+    def on_bar(self, candle: Candle, signal: object) -> BarOutcome:
+        """確定足1本の自己管理 (TradingLoop の旧インラインブロックを内包)。
+
+        signal は ProviderOutput (structure_events / rsi_value / tp_sr_zones /
+        sma90_int)。すべて決定論で、LLM・リスク層を一切経由しない (第1条)。
+        """
+        plan = self._plan
+        expired = False
+        if self._state is PosState.PROBE_PENDING:
+            reason = self.on_bar_pending(candle)
+            expired = reason == "expired"
+        for sev in signal.structure_events:
+            self.on_structure_event(sev)
+        if self._state in (PosState.PROBE, PosState.SL_AT_BE):
+            self.on_wave1_break(candle, plan.w1_high_int,
+                                add_volume_steps=plan.add_volume_steps)
+        if self._state is PosState.SL_AT_BE:
+            # 半分利確: RSI利確圏 / 90SMA接触 / 重要SRゾーン到達 (③-1)
+            self.on_half_tp_signal(candle, signal.rsi_value, signal.tp_sr_zones,
+                                   signal.sma90_int)
+        elif self._state is PosState.RUNNER:
+            # 残玉決済 (③-2): フィボ目標まで伸ばし、下方は建値SLで保護。ダウ転換
+            # クローズは手法に無いため既定で行わない (runner_reversal_exit=True で旧挙動)。
+            filled = self.on_runner_target(candle, plan.fib_target_int)
+            if not filled and self._cfg.runner_reversal_exit:
+                for sev in signal.structure_events:
+                    if self._state is PosState.RUNNER and self.on_runner_reversal(sev):
+                        break
+        return BarOutcome(closed=self._state is PosState.CLOSED, expired=expired)
+
+    def close(self, reason: str) -> None:
+        """残存ポジションの手仕舞い (未約定は取消、保有玉は全決済)。"""
+        if self._state is PosState.PROBE_PENDING:
+            self.abort_pending(reason)
+        elif self._state is not PosState.CLOSED:
+            self.close_all(reason)
+
+
+# 後方互換: 旧名 PositionFSM は NarrowFocusExecution の別名。プロパティテストや
+# 既存の import (infers.execution.sm import PositionFSM) はそのまま動く。
+PositionFSM = NarrowFocusExecution

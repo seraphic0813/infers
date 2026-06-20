@@ -21,10 +21,11 @@ from typing import Callable, Iterable, Protocol
 from infers.ai.gateway import AiGateway, JudgementRequest
 from infers.analysis.dow import StructureEvent
 from infers.analysis.support_resistance import SRZone
+from infers.core.execution import ExecutionModel
 from infers.core.models import Candle
 from infers.execution.risk import OrderRequest, RiskManager, VolumeSizer
 from infers.execution.sim_broker import BrokerEvent
-from infers.execution.sm import BrokerPort, FsmConfig, PositionFSM, PosState
+from infers.execution.sm import BrokerPort, FsmConfig
 
 
 class EquityProvider(Protocol):
@@ -99,11 +100,16 @@ class TradingLoop:
                  journal: "JournalSink | None" = None,
                  expiry_sink: "Callable[[str], None] | None" = None,
                  volume_sizer: "VolumeSizer | None" = None,
-                 equity_provider: "EquityProvider | None" = None) -> None:
+                 equity_provider: "EquityProvider | None" = None,
+                 execution_factory: "Callable[..., ExecutionModel] | None" = None) -> None:
         self._broker = broker
         self._gateway = gateway
         self._risk = risk
         self._fsm_cfg = fsm_config
+        # 執行モデルの生成器 (段階2.3)。手法ごとに執行ライフサイクルを差し替える
+        # 注入点。None のときは既定の Narrow Focus 執行 (NarrowFocusExecution) を
+        # 遅延 import で構築する (L0 がモジュールレベルで L2 を import しないため)。
+        self._execution_factory = execution_factory
         # 追記専用ジャーナル (ライブのみ注入。None でバックテスト同等の純粋経路)。
         self._journal = journal
         # 失効リカバリー: 打診指値が「時間切れ (expired)」でキャンセルされた瞬間に
@@ -115,8 +121,22 @@ class TradingLoop:
         # 可変ロットサイジング: 両方 None なら plan.volume_steps の固定値を使う (旧挙動)。
         self._sizer = volume_sizer
         self._equity_prov = equity_provider
-        self.open_positions: dict[str, tuple[PositionFSM, TradePlan]] = {}
+        self.open_positions: dict[str, tuple[ExecutionModel, TradePlan]] = {}
         self._current_day: date | None = None
+
+    def _new_execution(self, position_id: str, direction: int) -> ExecutionModel:
+        """執行モデルを1つ生成する (抽象 ExecutionModel を返す)。"""
+        journal_sink = (self._journal.fsm_sink(position_id)
+                        if self._journal is not None else None)
+        if self._execution_factory is not None:
+            return self._execution_factory(
+                position_id=position_id, direction=direction,
+                broker=self._broker, config=self._fsm_cfg, journal_sink=journal_sink)
+        # 既定: Narrow Focus 執行。遅延 import で L0→L2 のモジュール依存を避ける。
+        from infers.execution.sm import NarrowFocusExecution
+        return NarrowFocusExecution(
+            position_id=position_id, direction=direction,
+            broker=self._broker, config=self._fsm_cfg, journal_sink=journal_sink)
 
     # -- 1) ブローカーイベント配送 -------------------------------------------------
 
@@ -125,11 +145,8 @@ class TradingLoop:
             entry = self.open_positions.get(ev.position_id)
             if entry is None:
                 continue
-            fsm, _ = entry
-            if ev.kind == "FILL" and fsm.state is PosState.PROBE_PENDING:
-                fsm.on_probe_fill(ev.price_int, ev.volume_steps)
-            elif ev.kind == "SL_HIT":
-                fsm.on_sl_hit(ev.price_int)
+            execution, _ = entry
+            execution.on_broker_event(ev)
 
     # -- 2)+3) 確定足処理 ----------------------------------------------------------
 
@@ -152,38 +169,20 @@ class TradingLoop:
             self._risk.new_day()
             self._gateway.new_day()
 
-        # 既存ポジションの管理 (決定論。AI/リスク層を一切経由しない)
-        for pid, (fsm, plan) in list(self.open_positions.items()):
-            if fsm.state is PosState.PROBE_PENDING:
-                reason = fsm.on_bar_pending(candle)
-                if reason == "expired" and self._expiry_sink is not None:
-                    # 時間切れ失効 → クールダウン即時解除 (機会損失のリカバリー)。
-                    # 無効化 (シナリオ崩壊) では解除しない。
-                    self._expiry_sink(pid)
-            for sev in output.structure_events:
-                fsm.on_structure_event(sev)
-            if fsm.state in (PosState.PROBE, PosState.SL_AT_BE):
-                fsm.on_wave1_break(candle, plan.w1_high_int,
-                                   add_volume_steps=plan.add_volume_steps)
-            if fsm.state is PosState.SL_AT_BE:
-                # 半分利確: RSI利確圏 / 90SMA接触 / 重要SRゾーン到達 (③-1)
-                fsm.on_half_tp_signal(candle, output.rsi_value, output.tp_sr_zones,
-                                      output.sma90_int)
-            elif fsm.state is PosState.RUNNER:
-                # 残玉決済 (entry-methodology.md ③-2): ランナーはフィボ目標まで伸ばし、
-                # 下方は建値SLで保護する。ダウ転換クローズは手法に無いため既定で行わない
-                # (runner_reversal_exit=True で旧挙動)。
-                filled = fsm.on_runner_target(candle, plan.fib_target_int)
-                if not filled and self._fsm_cfg.runner_reversal_exit:
-                    for sev in output.structure_events:
-                        if fsm.state is PosState.RUNNER and fsm.on_runner_reversal(sev):
-                            break
-            if fsm.state is PosState.CLOSED:
+        # 既存ポジションの管理 (決定論。AI/リスク層を一切経由しない)。執行モデル
+        # 抽象 (ExecutionModel.on_bar) に委譲し、ループは手法固有の執行手順を知らない。
+        for pid, (execution, _plan) in list(self.open_positions.items()):
+            outcome = execution.on_bar(candle, output)
+            if outcome.expired and self._expiry_sink is not None:
+                # 時間切れ失効 → クールダウン即時解除 (機会損失のリカバリー)。
+                # 無効化 (シナリオ崩壊) では解除しない。
+                self._expiry_sink(pid)
+            if outcome.closed:
                 closed.append(pid)
                 del self.open_positions[pid]
 
         # 新規プラン → AIゲート → リスク拒否権 → 打診発注
-        open_volume = sum(f.volume_steps for f, _ in self.open_positions.values())
+        open_volume = sum(em.volume_steps for em, _ in self.open_positions.values())
         for plan in output.plans:
             if plan.plan_id in self.open_positions:
                 continue  # 冪等: 同一プランの再発行は無視 (二重建て防止)
@@ -233,15 +232,9 @@ class TradingLoop:
                         "volume_steps": sized_plan.volume_steps,
                         "spread_ticks": spread_ticks})
                 continue
-            fsm = PositionFSM(position_id=plan.plan_id, direction=plan.direction,
-                              broker=self._broker, config=self._fsm_cfg,
-                              journal_sink=(self._journal.fsm_sink(plan.plan_id)
-                                            if self._journal is not None else None))
-            fsm.place_probe(
-                limit_price_int=sized_plan.limit_price_int,
-                volume_steps=sized_plan.volume_steps, sl_int=sized_plan.sl_int,
-                expiry=sized_plan.expiry, invalidation_price=sized_plan.invalidation_price)
-            self.open_positions[plan.plan_id] = (fsm, sized_plan)
+            execution = self._new_execution(plan.plan_id, plan.direction)
+            execution.place(sized_plan)
+            self.open_positions[plan.plan_id] = (execution, sized_plan)
             open_volume += sized_plan.volume_steps
 
         return closed
@@ -251,11 +244,8 @@ class TradingLoop:
     def close_all_open(self, reason: str) -> list[str]:
         """残存ポジションの手仕舞い (データ末尾・シャットダウン)。"""
         closed: list[str] = []
-        for pid, (fsm, _) in list(self.open_positions.items()):
-            if fsm.state is PosState.PROBE_PENDING:
-                fsm.abort_pending(reason)
-            elif fsm.state is not PosState.CLOSED:
-                fsm.close_all(reason)
+        for pid, (execution, _) in list(self.open_positions.items()):
+            execution.close(reason)
             closed.append(pid)
             del self.open_positions[pid]
         return closed
