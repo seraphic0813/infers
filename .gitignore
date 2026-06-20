@@ -40,3 +40,16 @@ Thumbs.db
 # ローカル開発・テスト
 *.tmp
 test_output/
+
+# スクラッチ・使い捨てスクリプト
+gemini-code-*.py
+tmp_query.py
+scripts/
+
+# 採用判断前/不採用の実験バックテストレポート (reports/README.md に記載されたもののみ追跡)
+reports/rule_bemacro/
+reports/rule_depth50tier/
+reports/rule_depth618/
+reports/rule_depthtier/
+reports/rule_macrok10/
+reports/rule_macrok125/
