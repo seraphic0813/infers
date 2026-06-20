@@ -6,7 +6,7 @@
 ## 0. この文書の位置づけ
 
 - [docs/phase1-architecture.md](phase1-architecture.md)(以下「phase1」)が引き続き**詳細設計の正**。本書はそれを否定せず、**「単一手法(Narrow Focus)固定」だった構造を「複数手法プラットフォーム」へ一般化する差分**を定義する。
-- エントリー判定ロジックの正は引き続き [docs/entry-methodology.md](entry-methodology.md)。本書は Narrow Focus 手法の中身を1ビットも変えない。
+- エントリー判定ロジックの正は引き続き [entry-methodology.md](../src/infers/strategies/narrow_focus/entry-methodology.md)(2026-06-20 `docs/` から `src/infers/strategies/narrow_focus/` へ再配置。手法固有の方法論文書は各手法フォルダへ同居させる方針)。本書は Narrow Focus 手法の中身を1ビットも変えない。
 - 合意・確定後、[CLAUDE.md](../CLAUDE.md) のディレクトリ構成・コマンド節を本書に合わせて更新する。
 
 ## 1. 背景 — なぜ再設計するか
@@ -126,7 +126,7 @@ class StrategySpec:
     build_execution: Callable[..., ExecutionModel]
     default_params: Mapping[str, object]   # 既定パラメータ(現 ProviderConfig 相当)
     description: str
-    methodology_doc: str | None     # 例: docs/entry-methodology.md
+    methodology_doc: str | None     # 例: strategies/narrow_focus/entry-methodology.md
 ```
 
 - 中央レジストリ(`strategies/registry.py`)に各手法を名前で登録。CLI は `--strategy depth50` で引く。

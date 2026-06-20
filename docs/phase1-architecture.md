@@ -4,7 +4,7 @@
 対象手法: 「Narrow Focus トレード手法 総合マニュアル」
 作成日: 2026-06-10 / ステータス: フェーズ1ドラフト
 
-> **⚠ エントリー判定ロジックの正は [entry-methodology.md](entry-methodology.md) に移管(2026-06-13)。**
+> **⚠ エントリー判定ロジックの正は [entry-methodology.md](../src/infers/strategies/narrow_focus/entry-methodology.md) に移管(2026-06-13。2026-06-20 docs/ → strategies/narrow_focus/ へ再配置)。**
 > 本設計書の §3〜§5(マクロ/ミクロ分析・未来裁量によるエントリー組成)は、ダウ/エリオット/フィボ/
 > レジサポの**機構の実装詳細**としては有効だが、**各要素の役割・ゲート構成**は entry-methodology.md を
 > 優先する。特に「マクロ方向 = 200SMA位置(D1/1H)」「40%深さスクリーニング」「ニュース遮断」は

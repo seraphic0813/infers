@@ -1,6 +1,6 @@
 """Narrow Focus 手法 (depth50 ベースライン)。
 
-エントリー判定ロジックの正は docs/entry-methodology.md。本パッケージは
+エントリー判定ロジックの正は同フォルダの entry-methodology.md。本パッケージは
 分析パイプライン(provider.py)+ Elliott/Fibonacci/ZigZag/RSIマルチTF/
 未来裁量/コンフルエンスの各分析モジュールから構成される。
 
