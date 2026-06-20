@@ -136,6 +136,19 @@ def build_provider(args: argparse.Namespace) -> SignalProvider:
     return InfersSignalProvider(symbol=args.symbol, tf=Timeframe(args.tf), config=cfg)
 
 
+def build_execution_factory(args: argparse.Namespace):
+    """手法レジストリが指定する執行モデル生成器 (段階2.5)。
+
+    --strategy 指定時はそのレジストリ登録の build_execution を返す(market_tpsl 等は
+    別執行モデルを持つ)。未指定・--provider 経路・build_execution=None の手法では
+    None を返し、TradingLoop は既定の Narrow Focus 執行を使う(従来挙動・1ビット不変)。
+    """
+    if args.strategy and not args.provider:
+        from infers.strategies.registry import get_strategy
+        return get_strategy(args.strategy).build_execution
+    return None
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="infers", description="INFERS trading system")
     p.add_argument("--mode", choices=["backtest", "judge", "replay", "live", "export"],
@@ -444,6 +457,7 @@ def run_backtest(args: argparse.Namespace) -> int:
         swap=swap,
         volume_sizer=volume_sizer,
         equity_provider=equity_provider,
+        execution_factory=build_execution_factory(args),
     )
     report = engine.run(_with_progress(candles), build_provider(args),
                         recorder=recorder)

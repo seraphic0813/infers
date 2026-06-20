@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable
 
+from infers.core.execution import ExecutionModel
 from infers.core.loop import SignalProvider
 from infers.core.models import Timeframe
 
@@ -22,6 +23,12 @@ class StrategySpec:
     name: str
     build: Callable[..., SignalProvider]
     description: str
+    # 執行モデルの生成器 (段階2.5)。手法は分析(Strategy/SignalProvider)と
+    # 執行ライフサイクル(ExecutionModel)の組で1つを成す。None のとき TradingLoop は
+    # 既定の Narrow Focus 執行 (NarrowFocusExecution) を使う(narrow_focus/depth50 は
+    # これに該当し、執行経路は従来と1ビットも変わらない)。シグネチャは
+    # (position_id, direction, broker, config, journal_sink) -> ExecutionModel。
+    build_execution: "Callable[..., ExecutionModel] | None" = None
 
 
 _REGISTRY: dict[str, StrategySpec] = {}
@@ -71,4 +78,27 @@ register(StrategySpec(
     name="depth50",
     build=_build_depth50,
     description="v1.0確定ベースライン (riskfix+40%深さスクリーニングを50%へ緩和)",
+))
+
+
+def _build_market_tpsl(*, symbol: str, tf: Timeframe) -> SignalProvider:
+    """SMAクロス手法の分析層 (段階2.5: 執行モデル抽象の実証用)。"""
+    from infers.strategies.market_tpsl.provider import SmaCrossProvider
+    return SmaCrossProvider(symbol=symbol, tf=tf)
+
+
+def _build_market_execution(*, position_id, direction, broker, config,
+                            journal_sink=None) -> ExecutionModel:
+    """成行参入+固定TP/SL の執行モデル生成器 (TradingLoop へ注入)。"""
+    from infers.strategies.market_tpsl.execution import MarketTpSlExecution
+    return MarketTpSlExecution(position_id=position_id, direction=direction,
+                               broker=broker, config=config, journal_sink=journal_sink)
+
+
+register(StrategySpec(
+    name="market_tpsl",
+    build=_build_market_tpsl,
+    build_execution=_build_market_execution,
+    description="SMAクロス + 成行参入/固定TP/SL (Narrow Focus とは別の執行ライフサイクル。"
+                "TradingLoop が執行モデル非依存であることの実証用)",
 ))

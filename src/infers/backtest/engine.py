@@ -287,7 +287,8 @@ class BacktestEngine:
                  risk: RiskManager, fsm_config: FsmConfig,
                  swap: SwapConfig | None = None,
                  volume_sizer: "VolumeSizer | None" = None,
-                 equity_provider: "BacktestEquityProvider | None" = None) -> None:
+                 equity_provider: "BacktestEquityProvider | None" = None,
+                 execution_factory=None) -> None:
         self._broker = broker
         self._gateway = gateway
         self._risk = risk
@@ -295,6 +296,9 @@ class BacktestEngine:
         self._swap = swap or SwapConfig()
         self._sizer = volume_sizer
         self._equity_prov = equity_provider
+        # 執行モデル生成器 (段階2.5)。None で既定の Narrow Focus 執行。
+        # 手法ごとに執行ライフサイクルを差し替える注入点。
+        self._execution_factory = execution_factory
 
     # -- Pass 1: 裁定イベント収集 (LLMは一切呼ばない) ------------------------------
 
@@ -372,7 +376,8 @@ class BacktestEngine:
                            risk=self._risk, fsm_config=self._fsm_cfg,
                            expiry_sink=expiry_sink,
                            volume_sizer=self._sizer,
-                           equity_provider=self._equity_prov)
+                           equity_provider=self._equity_prov,
+                           execution_factory=self._execution_factory)
         trades: list[TradeRecord] = []
 
         for candle in candles:
