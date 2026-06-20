@@ -149,6 +149,24 @@ def build_execution_factory(args: argparse.Namespace):
     return None
 
 
+def resolve_report_spec(args: argparse.Namespace):
+    """HTMLレポートの表示記述子 (core.report_spec.StrategyReportSpec) を解決する。
+
+    --strategy 指定時はレジストリ登録の report_spec(未登録なら None →
+    GENERIC_REPORT_SPEC へフォールバック)。--provider 指定時は何が来るか
+    分からないため汎用フォールバック。いずれも未指定 (従来のフラグ組み立て
+    経路 = 常に Narrow Focus) では NARROW_FOCUS_REPORT_SPEC を返す
+    (depth50 等の既存レポートを1ビットも変えないため)。
+    """
+    if args.provider:
+        return None
+    if args.strategy:
+        from infers.strategies.registry import get_strategy
+        return get_strategy(args.strategy).report_spec
+    from infers.strategies.narrow_focus.report import NARROW_FOCUS_REPORT_SPEC
+    return NARROW_FOCUS_REPORT_SPEC
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="infers", description="INFERS trading system")
     p.add_argument("--mode", choices=["backtest", "judge", "replay", "live", "export"],
@@ -420,8 +438,10 @@ def run_backtest(args: argparse.Namespace) -> int:
     recorder = None
     if args.report:
         from infers.backtest.report_html import BacktestRecorder, RecordingGateway
+        from infers.core.report_spec import GENERIC_REPORT_SPEC
         gateway = RecordingGateway(gateway)
-        recorder = BacktestRecorder(gateway=gateway)
+        report_spec = resolve_report_spec(args) or GENERIC_REPORT_SPEC
+        recorder = BacktestRecorder(gateway=gateway, report_spec=report_spec)
 
     swap = _build_swap_config(args)
     if swap.enabled:

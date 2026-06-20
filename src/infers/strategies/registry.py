@@ -16,6 +16,9 @@ from typing import Callable
 from infers.core.execution import ExecutionModel
 from infers.core.loop import SignalProvider
 from infers.core.models import Timeframe
+from infers.core.report_spec import StrategyReportSpec
+from infers.strategies.narrow_focus.report import NARROW_FOCUS_REPORT_SPEC
+from infers.strategies.smc_bos.report import SMC_BOS_REPORT_SPEC
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,9 @@ class StrategySpec:
     # これに該当し、執行経路は従来と1ビットも変わらない)。シグネチャは
     # (position_id, direction, broker, config, journal_sink) -> ExecutionModel。
     build_execution: "Callable[..., ExecutionModel] | None" = None
+    # レポート表示記述子 (report_html.py)。None のとき main.py は手法非依存の
+    # 汎用フォールバック(GENERIC_REPORT_SPEC)を使う。
+    report_spec: "StrategyReportSpec | None" = None
 
 
 _REGISTRY: dict[str, StrategySpec] = {}
@@ -73,11 +79,13 @@ register(StrategySpec(
     name="narrow_focus",
     build=_build_narrow_focus,
     description="Narrow Focus 分析パイプライン (ProviderConfig既定値。フラグ未指定時の従来挙動と同一)",
+    report_spec=NARROW_FOCUS_REPORT_SPEC,
 ))
 register(StrategySpec(
     name="depth50",
     build=_build_depth50,
     description="v1.0確定ベースライン (riskfix+40%深さスクリーニングを50%へ緩和)",
+    report_spec=NARROW_FOCUS_REPORT_SPEC,
 ))
 
 
@@ -129,4 +137,5 @@ register(StrategySpec(
     description="M30 SMC BOS(Break of Structure) + EMA80フィルタ (XAUUSD)。"
                 "構造ブレイク成行参入 + 固定SL/RR利確 (段階S2: SL前進はS4で追加)。"
                 "Narrow Focus / market_tpsl とは別の執行ライフサイクル",
+    report_spec=SMC_BOS_REPORT_SPEC,
 ))

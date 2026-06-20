@@ -359,4 +359,29 @@ depth50 が原典 Narrow Focus に「システム化のための追加/解釈」
 
 ---
 
+## 13. HTMLレポートのEMA80表示(2026-06-21追記)
+
+`--report` のHTMLレポートが Narrow Focus 固有の語彙(凡例・根拠ライン・トレード詳細・
+SMA90/200オーバーレイ)に固定されており、smc_bos の結果が正しく表示できない問題が
+あった(`features` の `dow_state`/`families` 等が undefined、出口分類がNF固有イベント
+[`HALF_TAKE_PROFIT`等]前提で `TP_CLOSE` を取りこぼす等)。
+
+`backtest/report_html.py`(L4)を手法非依存化し、各手法が `core.report_spec.
+StrategyReportSpec`(L0契約)を介して表示方法(凡例・根拠ライン・トレード詳細の
+features一覧・チャートオーバーレイの表示可否・トレード表の根拠列の有無)を宣言する
+方式へ改修した(`strategies/narrow_focus/report.py` / `strategies/smc_bos/report.py`)。
+depth50/narrow_focus の表示は1ビットも変えていない(`dow_confluence_panel` 拡張フラグ
+で既存のグランビル/コンフルエンス詳細パネルを丸ごと保持)。
+
+smc_bos のレポートでは以下が手法に合わせて表示される:
+- **EMA80オーバーレイ**(本手法の核心フィルター。紫色 `#7e57c2` でチャートに描画)。
+  SMA90/200・RSIペインは smc_bos では使わないため非表示(表示可否制御)。
+- トレード詳細に `ema80`/`atr`/`swing_high`/`swing_low`(features)を表示。
+- 根拠ライン: 参入(成行)/SL(初期)/TP(固定RR)のみ(W1高値・フィボ・SRゾーン等の
+  Narrow Focus固有ラインは描画しない)。
+- 退出分類は `market_tpsl` と共通の `generic_classify_exits`(MOVE_SL先行で「保護SL」を
+  区別)。コンフルエンス概念を持たないため根拠列(フィルタ含む)は非表示。
+
+---
+
 > **次アクション**: 本ドラフトをレビューいただき、特に §5.6(M30追加)・§5.3(EMA新設)・§5.7(ゲート方針)・§3.3(BE翻訳)に合意が取れれば、段階 S0(前提整備)から着手する。
