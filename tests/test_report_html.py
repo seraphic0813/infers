@@ -21,6 +21,7 @@ from infers.backtest.report_html import (
 from infers.core.models import Candle, SymbolSpec, Timeframe
 from infers.execution.risk import RiskConfig, RiskManager
 from infers.execution.sm import FsmConfig
+from infers.strategies.narrow_focus.report import NARROW_FOCUS_REPORT_SPEC
 
 UTC = timezone.utc
 T0 = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)
@@ -95,7 +96,7 @@ def run_with_recorder(script: dict[int, ProviderOutput]):
         client=FakeClient(), cache=VerdictCache(),
         policy=EscalationPolicy(score_l1=Decimal(2), score_l2=Decimal(4),
                                 ambiguity_gray=Decimal("0.1"), l2_daily_call_cap=99)))
-    recorder = BacktestRecorder(gateway=gateway)
+    recorder = BacktestRecorder(gateway=gateway, report_spec=NARROW_FOCUS_REPORT_SPEC)
     engine = BacktestEngine(
         broker=LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5),
         gateway=gateway,

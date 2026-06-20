@@ -30,7 +30,7 @@
 
 1. `src/infers/strategies/<手法名>/` を作る(`__init__.py` は循環 import を避けるため即時 re-export しない)。分析は `provider.py`(`SignalProvider`: `on_candle(candle) → ProviderOutput`)、執行が Narrow Focus と異なるなら `execution.py`(`ExecutionModel` プロトコル)。
 2. その手法専用の計算は手法フォルダ内に置く。**複数手法で使うようになった汎用インジケーターのみ** `indicators/` へ吸い上げる。
-3. `strategies/registry.py` に `StrategySpec` を1件 `register(...)`。執行を差し替えるなら `build_execution=` を指定、Narrow Focus 既定でよければ `None`。
+3. `strategies/registry.py` に `StrategySpec` を1件 `register(...)`。執行を差し替えるなら `build_execution=` を指定、Narrow Focus 既定でよければ `None`。HTMLレポート(`--report`)の凡例・根拠ライン・トレード詳細を手法に合わせたい場合は `report.py` に `core.report_spec.StrategyReportSpec` を1件定義し `report_spec=` で渡す(省略時は `GENERIC_REPORT_SPEC` の汎用表示にフォールバックする。`backtest/report_html.py` は手法固有の語彙を一切持たない)。
 4. 手法の方法論文書・バックテストレポートはその手法フォルダ配下に置く(`docs/` に置かない)。
 5. **既存手法の挙動を変えていないこと**を `pytest` 全合格 + depth50 バックテストのビット完全一致で確認してからコミットする。
 

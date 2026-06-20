@@ -3,12 +3,23 @@
 目的: バックテストの妥当性をトレーダーが目視検証できるようにする。
   ① 資金ベースのサマリー (初期資金→最終資金、USD損益、月次損益表、資産曲線)
   ② TradingView 系チャート (Lightweight Charts) でローソク足上に
-     エントリー/退出マーカー・SL/無効化/第1波高値/フィボ目標の根拠ラインを描画
+     エントリー/退出マーカー・根拠ライン(手法ごとに可変)を描画
 
 構成:
   - RecordingGateway : AiGateway をラップし、プランごとの最終 Verdict を記録
   - BacktestRecorder : engine.run(recorder=...) フックでトレード詳細を収集
   - write_html_report: report.html + report_data.js を出力 (ブラウザで開くだけ)
+
+本モジュール (L4) は手法固有の語彙(ジャーナルイベント名・featuresキー・
+凡例・根拠ライン)を一切持たない。表示方法は `core.report_spec.
+StrategyReportSpec`(各手法が `strategies/<手法名>/report.py` で定義)を
+呼び出し側(main.py)から受け取って描画する(`ExecutionModel` と同型の
+L2→L0契約パターン)。手法を指定しない/記述子未登録の場合は
+`GENERIC_REPORT_SPEC` にフォールバックする。
+
+旧 `classify_exits`(Narrow Focus 固有)は `strategies/narrow_focus/report.py`
+へ物理移設済み。本モジュールからは後方互換のため遅延 re-export される
+(`core/loop.py` の PEP 562 パターンと同型)。
 
 数値規約 (CLAUDE.md 第6条): 内部は整数ティック/Decimal のまま集計し、
 float への変換は JS 表示境界のみ。チャート時刻は UTC unix 秒 (第7条)。
@@ -27,42 +38,21 @@ from infers.ai.gateway import AiGateway, JudgementRequest, Verdict
 from infers.backtest.engine import BacktestReport, TradeRecord, _Ledger
 from infers.core.loop import TradePlan
 from infers.core.models import Candle, SymbolSpec, Timeframe
+from infers.core.report_spec import GENERIC_REPORT_SPEC, StrategyReportSpec
 
 _Q2 = Decimal("0.01")
 
-
-# 退出イベント → 表示種別。台帳 exits と同順で並ぶ (各退出が1件のジャーナル
-# イベントに対応する)。"TP"=半分利確, "BE_SL"=建値SL(建値移動後のSL), "SL"=損切り,
-# 残玉決済 CLOSE_ALL は reason で細分: "FIB"=フィボ目標到達, "DOW"=ダウ転換,
-# "EOD"=データ末尾手仕舞い, "CLOSE"=その他。
-_EXIT_EVENTS = {"HALF_TAKE_PROFIT", "SL_HIT", "CLOSE_ALL"}
-_CLOSE_REASON_KIND = {
-    "FIB_TARGET": "FIB",
-    "DOW_REVERSAL": "DOW",
-    "END_OF_DATA": "EOD",
-}
+# 後方互換: classify_exits は strategies/narrow_focus/report.py へ物理移設済み。
+# モジュールレベルで L2 を import しないよう、属性アクセス時のみ遅延解決する
+# (core/loop.py の PEP 562 パターンと同型)。
+_LAZY_REEXPORTS = {"classify_exits"}
 
 
-def classify_exits(journal: list) -> list[str]:
-    """FSMジャーナルを走査し、各退出の種別を発生順に返す。
-
-    - 建値SL移動 (SL_TO_BREAKEVEN) 後の SL_HIT は損切りではなく「建値SL」。
-    - 残玉決済 (CLOSE_ALL) は reason により フィボ目標 / ダウ転換 / 期末 を区別する
-      (チャートで『なぜ閉じたか』を目視検証できるように)。
-    """
-    kinds: list[str] = []
-    be_active = False
-    for name, payload in journal:
-        if name == "SL_TO_BREAKEVEN":
-            be_active = True
-        elif name == "HALF_TAKE_PROFIT":
-            kinds.append("TP")
-        elif name == "SL_HIT":
-            kinds.append("BE_SL" if be_active else "SL")
-        elif name == "CLOSE_ALL":
-            reason = payload.get("reason") if isinstance(payload, dict) else None
-            kinds.append(_CLOSE_REASON_KIND.get(reason, "CLOSE"))
-    return kinds
+def __getattr__(name: str):
+    if name in _LAZY_REEXPORTS:
+        from infers.strategies.narrow_focus import report as _nf_report
+        return getattr(_nf_report, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _request_key(request: JudgementRequest) -> str:
@@ -110,9 +100,15 @@ class RecordingGateway:
 @dataclass
 class BacktestRecorder:
     """engine.run(recorder=...) フック実装。トレード/未約定プランの詳細を
-    JSON化可能な dict として収集する。"""
+    JSON化可能な dict として収集する。
+
+    `report_spec` は呼び出し側(main.py)が手法から解決して渡す(本クラスは
+    どの手法かを知らない)。未指定時は `GENERIC_REPORT_SPEC`(手法非依存の
+    安全な既定)を使う。
+    """
 
     gateway: RecordingGateway | None = None
+    report_spec: StrategyReportSpec = field(default_factory=lambda: GENERIC_REPORT_SPEC)
     trades: list[dict] = field(default_factory=list)
     unfilled: list[dict] = field(default_factory=list)
 
@@ -156,8 +152,9 @@ class BacktestRecorder:
             "exits": [[_unix(t), p, v] for (p, v), t
                       in zip(ledger.exits, ledger.exit_times)],
             # 各退出を1件ずつ分類 (台帳の exits と同順)。一律 exit_kind では
-            # 半分利確まで "SL" と誤表示されるため (表示バグ修正)。
-            "exit_kinds": classify_exits(journal),
+            # 半分利確まで "SL" と誤表示されるため (表示バグ修正)。手法ごとの
+            # 分類ロジックは report_spec.classify_exits に委譲する。
+            "exit_kinds": self.report_spec.classify_exits(journal),
             "journal": journal,
             "plan": self._plan_dict(plan),
             "features": dict(plan.request.features),
@@ -292,12 +289,32 @@ def build_report_data(*, candles: list[Candle], report: BacktestReport,
         "avg_loss_usd": str((sum(losses) / len(losses)).quantize(_Q2)) if losses else None,
         "largest_win_usd": str(max(wins).quantize(_Q2)) if wins else None,
         "largest_loss_usd": str(min(losses).quantize(_Q2)) if losses else None,
-        "volume_note": f"打診 {trades_out[0]['plan']['volume_steps'] if trades_out else 2}"
+        "volume_note": f"{recorder.report_spec.volume_label} "
+                       f"{trades_out[0]['plan']['volume_steps'] if trades_out else 2}"
                        f" steps × lot_step {spec.lot_step} lot",
+    }
+
+    # 手法ごとの表示記述子 (JSONシリアライズ可能な部分のみ。classify_exits は
+    # Python側専用で既に exit_kinds へ反映済みのため埋め込まない)。
+    rspec = recorder.report_spec
+    display = {
+        "name": rspec.name,
+        "exit_meta": rspec.exit_meta,
+        "plan_lines": [list(t) for t in rspec.plan_lines],
+        "overlays": {
+            "sma": list(rspec.overlays.get("sma", ())),
+            "ema": list(rspec.overlays.get("ema", ())),
+            "rsi": bool(rspec.overlays.get("rsi", False)),
+        },
+        "feature_fields": [list(t) for t in rspec.feature_fields],
+        "family_column": rspec.family_column,
+        "legend": [list(t) for t in rspec.legend],
+        "extras": sorted(rspec.extras),
     }
 
     return {
         "summary": summary,
+        "display": display,
         "equity": equity_usd,
         "monthly": {k: str(v.quantize(_Q2)) for k, v in sorted(monthly.items())},
         "trades": trades_out,
@@ -440,20 +457,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
     <div id="chart"></div>
     <div id="rsi"></div>
-    <div class="legend">
-      <span><span class="sw" style="background:#2962ff"></span>SMA90</span>
-      <span><span class="sw" style="background:#f59e0b"></span>SMA200</span>
-      <span><span class="sw" style="background:#26a69a"></span>エントリー (▲買/▼売) / 半分利確 (■)</span>
-      <span><span class="sw" style="background:#ab47bc"></span>フィボ目標利確 (■)</span>
-      <span><span class="sw" style="background:#42a5f5"></span>ダウ転換決済 (■)</span>
-      <span><span class="sw" style="background:#ffb74d"></span>建値SL (●)</span>
-      <span><span class="sw" style="background:#ef5350"></span>損切りSL (●)</span>
-      <span><span class="sw" style="background:#26a69a"></span>指値発注 (◇) 〜 失効期限 (◇) ・有効期間=破線</span>
-      <span><span class="sw" style="background:#ffd54f"></span>選択トレード (黄=ハイライト, 選択時は他トレード非表示)</span>
-      <span><span class="sw" style="background:#d4af37"></span>FIB押し戻し (38.2/50/61.8/78.6)</span>
-      <span><span class="sw" style="background:#4dd0e1"></span>SRゾーン (上下端)</span>
-      <span>— 根拠ライン: 指値 / SL初期 / 無効化 / 第1波高値 / フィボ161.8%目標 / SMA90・200</span>
-    </div>
+    <div class="legend" id="legend"></div>
   </div>
 
   <!-- ③ トレード一覧 + 詳細 -->
@@ -466,23 +470,20 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
         <select id="f-dir"><option value="">全</option><option value="1">買</option
           ><option value="-1">売</option></select>
         <span>退出</span>
-        <select id="f-exit"><option value="">全</option><option value="TP">半分利確</option
-          ><option value="BE_SL">建値SL</option><option value="SL">損切りSL</option
-          ><option value="FIB">フィボ目標利確</option><option value="DOW">ダウ転換決済</option
-          ><option value="EOD">期末手仕舞い</option><option value="CLOSE">手仕舞い</option></select>
+        <select id="f-exit"><option value="">全</option></select>
         <span>勝敗</span>
         <select id="f-res"><option value="">全</option><option value="win">勝ち</option
           ><option value="loss">負け</option></select>
-        <span>根拠</span>
-        <input id="f-fam" placeholder="例 DOW / SMA / RSI" style="width:120px">
+        <span id="f-fam-wrap"><span>根拠</span>
+        <input id="f-fam" placeholder="例 DOW / SMA / RSI" style="width:120px"></span>
         <button id="f-clear">クリア</button>
       </div>
       <div id="tradetbl-box">
         <table id="tradetbl">
-          <thead><tr>
+          <thead><tr id="thead-row">
             <th>#</th><th>エントリー日時(UTC)</th><th>方向</th><th>建値</th>
             <th>退出</th><th>退出種別</th><th>PnL</th><th>R</th>
-            <th>根拠</th><th>conf</th>
+            <th id="th-family">根拠</th><th>conf</th>
           </tr></thead>
           <tbody></tbody>
           <tfoot id="tfoot"></tfoot>
@@ -555,6 +556,21 @@ function smaArray(agg, period) {
   }
   return out;
 }
+// ---- EMA を全長配列で計算 (最初の period 本の単純平均でシード→以後漸化式) ----
+function emaArray(agg, period) {
+  const cc = agg.c, out = new Array(cc.length).fill(null);
+  const k = 2 / (period + 1); let seedSum = 0, ema = null;
+  for (let i = 0; i < cc.length; i++) {
+    if (ema == null) {
+      seedSum += cc[i];
+      if (i >= period - 1) { ema = seedSum / period; out[i] = px(ema); }
+    } else {
+      ema = ema + k * (cc[i] - ema);
+      out[i] = px(ema);
+    }
+  }
+  return out;
+}
 function seriesFromArray(agg, arr) {
   const o = [];
   for (let i = 0; i < arr.length; i++) if (arr[i] != null) o.push({ time: agg.t[i], value: arr[i] });
@@ -582,6 +598,31 @@ function barIndexAtTime(agg, time) {
   let lo = 0, hi = t.length - 1, ans = 0;
   while (lo <= hi) { const m = (lo + hi) >> 1; if (t[m] <= time) { ans = m; lo = m + 1; } else hi = m - 1; }
   return ans;
+}
+
+// ---- 手法ごとの表示記述子 (core.report_spec.StrategyReportSpec のJSON化) ----
+const D = BT.display || { exit_meta: {}, plan_lines: [], overlays: {}, feature_fields: [],
+                          family_column: null, legend: [], extras: [] };
+
+// ---- 凡例 (D.legend 駆動。色なし=プレーンテキスト行) ----
+document.getElementById("legend").innerHTML = (D.legend || []).map(([color, label]) =>
+  color ? `<span><span class="sw" style="background:${color}"></span>${label}</span>`
+        : `<span>${label}</span>`).join("");
+
+// ---- 退出フィルタの選択肢 (D.exit_meta 駆動) ----
+document.getElementById("f-exit").innerHTML = '<option value="">全</option>' +
+  Object.entries(D.exit_meta || {}).map(([k, m]) => `<option value="${k}">${m.label}</option>`).join("");
+
+// ---- 根拠列 (D.family_column が無い手法では列自体を非表示。表示可否制御) ----
+const HAS_FAMILY = !!D.family_column;
+if (!HAS_FAMILY) {
+  document.getElementById("th-family").remove();
+  document.getElementById("f-fam-wrap").remove();
+}
+
+// ---- RSIペイン (D.overlays.rsi が false の手法では非表示。表示可否制御) ----
+if (!(D.overlays && D.overlays.rsi)) {
+  document.getElementById("rsi").style.display = "none";
 }
 
 // ---- ヘッダ + 円レート入力 ----
@@ -681,18 +722,29 @@ const candleSeries = chart.addCandlestickSeries({
   wickDownColor: "#ef5350", borderVisible: false,
   priceFormat: { type: "price", precision: 2, minMove: TICK },
 });
-const sma90Series = chart.addLineSeries({ color: "#2962ff", lineWidth: 1,
-  priceLineVisible: false, lastValueVisible: false });
-const sma200Series = chart.addLineSeries({ color: "#f59e0b", lineWidth: 1,
-  priceLineVisible: false, lastValueVisible: false });
+// ---- 汎用オーバーレイ (D.overlays 駆動。表示可否制御: 論点2) ----
+const SMA_COLORS = { 90: "#2962ff", 200: "#f59e0b" };
+const EMA_COLORS = ["#7e57c2", "#26c6da", "#ec407a"];
+const smaPeriods = D.overlays.sma || [];
+const emaPeriods = D.overlays.ema || [];
+const smaSeries = smaPeriods.map(p => chart.addLineSeries({
+  color: SMA_COLORS[p] || "#888", lineWidth: 1, priceLineVisible: false, lastValueVisible: false }));
+const emaSeries = emaPeriods.map((p, i) => chart.addLineSeries({
+  color: EMA_COLORS[i % EMA_COLORS.length], lineWidth: 1,
+  priceLineVisible: false, lastValueVisible: false }));
 const rsiLine = rsiChart.addLineSeries({ color: "#b39ddb", lineWidth: 1,
   priceLineVisible: false, lastValueVisible: false });
-rsiLine.createPriceLine({ price: 70, color: "#787b86",
-  lineStyle: LightweightCharts.LineStyle.Dashed, title: "70" });
-rsiLine.createPriceLine({ price: 30, color: "#787b86",
-  lineStyle: LightweightCharts.LineStyle.Dashed, title: "30" });
+if (D.overlays.rsi) {
+  rsiLine.createPriceLine({ price: 70, color: "#787b86",
+    lineStyle: LightweightCharts.LineStyle.Dashed, title: "70" });
+  rsiLine.createPriceLine({ price: 30, color: "#787b86",
+    lineStyle: LightweightCharts.LineStyle.Dashed, title: "30" });
+}
 
 // ---- 表示TFの状態 (集約・SMA配列をグローバル保持: ズーム/グランビル計算で参照) ----
+// curSma90/curSma200 は dow_confluence_panel(NF固有詳細パネル)専用の内部計算で
+// あり、画面表示(smaSeries)とは独立に常時計算する(extras を持たない手法では
+// 単に未参照のまま無害)。
 let curTF = BAR;
 let curAgg = null, curSma90 = null, curSma200 = null;
 function applyTF(tfSec) {
@@ -701,13 +753,13 @@ function applyTF(tfSec) {
   candleSeries.setData(agg.t.map((tt, i) => ({ time: tt, open: px(agg.o[i]),
     high: px(agg.h[i]), low: px(agg.l[i]), close: px(agg.c[i]) })));
   curSma90 = smaArray(agg, 90); curSma200 = smaArray(agg, 200);
-  sma90Series.setData(seriesFromArray(agg, curSma90));
-  sma200Series.setData(seriesFromArray(agg, curSma200));
-  rsiLine.setData(rsiFrom(agg, 14));
+  smaPeriods.forEach((p, i) => smaSeries[i].setData(seriesFromArray(agg, smaArray(agg, p))));
+  emaPeriods.forEach((p, i) => emaSeries[i].setData(seriesFromArray(agg, emaArray(agg, p))));
+  if (D.overlays.rsi) rsiLine.setData(rsiFrom(agg, 14));
   const lbl = (TF_DEFS.find(d => d[1] === tfSec) || ["?"])[0];
   document.querySelectorAll("#tf-btns button").forEach(b =>
     b.classList.toggle("on", parseInt(b.dataset.tf) === tfSec));
-  document.getElementById("hdr-tf").textContent = `${S.symbol} ${lbl} (戦略はM5判定)`;
+  document.getElementById("hdr-tf").textContent = `${S.symbol} ${lbl} (戦略は${S.tf}判定)`;
 }
 applyTF(BAR);
 
@@ -745,17 +797,10 @@ const limitWinSeries = chart.addLineSeries({ color: "#26a69a", lineWidth: 2,
   lineStyle: LightweightCharts.LineStyle.Dashed, priceLineVisible: false,
   lastValueVisible: false, crosshairMarkerVisible: false });
 
-// ---- 退出種別ごとの色・形・ラベル ----
-const EXIT_META = {
-  TP:    { label: "半分利確",     color: "#26a69a", shape: "square" },
-  BE_SL: { label: "建値SL",       color: "#ffb74d", shape: "circle" },
-  SL:    { label: "損切りSL",     color: "#ef5350", shape: "circle" },
-  FIB:   { label: "フィボ目標利確", color: "#ab47bc", shape: "square" },
-  DOW:   { label: "ダウ転換決済",  color: "#42a5f5", shape: "square" },
-  EOD:   { label: "期末手仕舞い",  color: "#9aa0ab", shape: "square" },
-  CLOSE: { label: "手仕舞い",     color: "#b2b5be", shape: "square" },
-};
-const EXIT_LABEL = k => (EXIT_META[k] || EXIT_META.SL).label;
+// ---- 退出種別ごとの色・形・ラベル (D.exit_meta 駆動。手法ごとに可変) ----
+const EXIT_META = D.exit_meta || {};
+const EXIT_FALLBACK = { label: "退出", color: "#b2b5be", shape: "circle" };
+const EXIT_LABEL = k => (EXIT_META[k] || EXIT_FALLBACK).label;
 
 // ---- ③ 指値の発注バー時刻 (id の ISO) と失効時刻 (plan.expiry) ----
 function planTimes(t) {
@@ -783,7 +828,7 @@ function buildMarkers(si) {
     }
     t.exits.forEach(([tt, p, v], j) => {
       const k = (t.exit_kinds && t.exit_kinds[j]) || t.exit_kind;
-      const meta = EXIT_META[k] || EXIT_META.SL;
+      const meta = EXIT_META[k] || EXIT_FALLBACK;
       ms.push({ time: tt, position: t.dir > 0 ? "aboveBar" : "belowBar",
         color: sel ? "#ffd54f" : meta.color, shape: meta.shape,
         id: "T" + i, text: `#${i + 1} ${meta.label} ${px(p).toFixed(2)}` });
@@ -817,7 +862,7 @@ document.getElementById("chk-unfilled").addEventListener("change", e => {
 // ---- ⑥ フィルタ ----
 const F = {
   dir: document.getElementById("f-dir"), exit: document.getElementById("f-exit"),
-  res: document.getElementById("f-res"), fam: document.getElementById("f-fam"),
+  res: document.getElementById("f-res"), fam: document.getElementById("f-fam"),  // 非表示時はnull
 };
 function tradeMatches(t) {
   if (F.dir.value && String(t.dir) !== F.dir.value) return false;
@@ -828,8 +873,11 @@ function tradeMatches(t) {
   const pnl = parseFloat(t.pnl_usd);
   if (F.res.value === "win" && !(pnl > 0)) return false;
   if (F.res.value === "loss" && !(pnl < 0)) return false;
-  const fam = F.fam.value.trim().toUpperCase();
-  if (fam && !String(t.features.families || "").toUpperCase().includes(fam)) return false;
+  if (HAS_FAMILY && F.fam) {
+    const fam = F.fam.value.trim().toUpperCase();
+    const v = String(t.features[D.family_column] || "").toUpperCase();
+    if (fam && !v.includes(fam)) return false;
+  }
   return true;
 }
 
@@ -850,21 +898,24 @@ function renderTradeTable() {
       `<td>${EXIT_LABEL((t.exit_kinds && t.exit_kinds.at(-1)) || t.exit_kind)}</td>` +
       `<td class="${pnl >= 0 ? "pos" : "neg"}">${fmtY(t.pnl_usd)}</td>` +
       `<td>${t.r_multiple ?? "-"}</td>` +
-      `<td style="text-align:left">${t.features.families}</td>` +
+      (HAS_FAMILY ? `<td style="text-align:left">${t.features[D.family_column] ?? ""}</td>` : "") +
       `<td>${v.confidence ?? "-"}</td></tr>`;
   });
   tbody.innerHTML = rows;
-  // フィルタ結果の合計 (件数 / 勝率 / 平均R / PnL合計)
+  // フィルタ結果の合計 (件数 / 勝率 / 平均R / PnL合計)。根拠列の有無で列数が変わる。
   const wr = n ? (wins / n * 100).toFixed(1) : "0.0";
   const ar = nR ? (sumR / nR).toFixed(2) : "-";
   document.getElementById("tfoot").innerHTML =
     `<tr><td colspan="6">フィルタ結果 ${n} / ${trades.length} 件 ・ 勝率 ${wr}% ・ 平均R ${ar}</td>` +
-    `<td class="${sum >= 0 ? "pos" : "neg"}">${fmtY(sum)}</td><td colspan="3"></td></tr>`;
+    `<td class="${sum >= 0 ? "pos" : "neg"}">${fmtY(sum)}</td>` +
+    `<td colspan="${HAS_FAMILY ? 3 : 2}"></td></tr>`;
 }
 [F.dir, F.exit, F.res].forEach(el => el.addEventListener("change", renderTradeTable));
-F.fam.addEventListener("input", renderTradeTable);
+if (F.fam) F.fam.addEventListener("input", renderTradeTable);
 document.getElementById("f-clear").onclick = () => {
-  F.dir.value = ""; F.exit.value = ""; F.res.value = ""; F.fam.value = ""; renderTradeTable();
+  F.dir.value = ""; F.exit.value = ""; F.res.value = "";
+  if (F.fam) F.fam.value = "";
+  renderTradeTable();
 };
 
 // ---- ④ グランビル近似分類 (チャート足の price/SMA/傾きから推定) ----
@@ -891,12 +942,55 @@ function famPretty(fams) {
 }
 
 // ---- トレード選択 (チャートズーム + 根拠ライン + 接続線 + ハイライト + 詳細) ----
+const LINE_STYLE = { solid: LightweightCharts.LineStyle.Solid,
+  dashed: LightweightCharts.LineStyle.Dashed, dotted: LightweightCharts.LineStyle.Dotted };
 let selIdx = -1;
 let priceLines = [];
 function clearLines() { priceLines.forEach(l => candleSeries.removePriceLine(l)); priceLines = []; }
 function addLine(price, color, title, style) {
   priceLines.push(candleSeries.createPriceLine({ price: px(price), color, title,
     lineStyle: style ?? LightweightCharts.LineStyle.Dashed, lineWidth: 1 }));
+}
+// ---- NF固有の詳細パネル(dow_confluence_panel extra)。原文を一切変更せず移設 ----
+function renderDowConfluencePanel(t, p, f, dir, pt) {
+  const swHi = Math.max(p.w1_high, p.w1_low), swLo = Math.min(p.w1_high, p.w1_low);
+  const swSpan = swHi - swLo;
+  const depth = swSpan > 0 ? (dir > 0 ? (p.limit - swLo) : (swHi - p.limit)) / swSpan : 0;
+  const depthOk = depth <= 0.40 ? "✓深い(40%以内)" : "△浅い(40%超)";
+  const halfTrig = (t.journal.find(([n]) => n === "HALF_TAKE_PROFIT") || [null, {}])[1].trigger || "—";
+  const eI2 = barIndexAtTime(curAgg, t.entry_time ?? t.exit_time);
+  const sma90v = curSma90[eI2], sma200v = curSma200[eI2];
+  const pricev = px(t.entries[0]?.[1] ?? curAgg.c[eI2]);
+  let gv = null, dev90 = null, dev200 = null;
+  if (sma90v != null) {
+    const k = Math.max(1, Math.min(3, eI2));
+    const slopeUp = sma90v - (curSma90[eI2 - k] ?? sma90v) >= 0;
+    gv = granvilleClassify(dir, pricev, sma90v, slopeUp);
+    dev90 = (pricev - sma90v) / sma90v * 100;
+  }
+  if (sma200v != null) dev200 = (pricev - sma200v) / sma200v * 100;
+  const devTxt = `SMA90 ${dev90 != null ? (dev90 >= 0 ? "+" : "") + dev90.toFixed(2) + "%" : "—"}` +
+    ` / SMA200 ${dev200 != null ? (dev200 >= 0 ? "+" : "") + dev200.toFixed(2) + "%" : "—"}`;
+  return `
+      <div class="k">方向 / マクロ</div><div>${dir > 0 ? "買い" : "売り"} (ダウ ${f.dow_state}) /
+        マクロダウ ${f.macro_dow ?? "-"} / 第2波TF ${f.wave2_tf ?? "M5"}</div>
+      <div class="k">グランビル(近似)</div><div>${gv ? `<b>${gv.no}</b> ${gv.label}` : "—"}
+        <span class="jr">(SMA90基準・チャート足から推定)</span></div>
+      <div class="k">SMA乖離</div><div>${devTxt} <span class="jr">(エントリー足)</span></div>
+      <div class="k">コンフルエンス</div><div>${famPretty(f.families)}
+        <span class="jr">(cluster_score=${f.cluster_score})</span></div>
+      <div class="k">根拠強度</div><div>ダウ ${f.dow_strength ?? "-"} / RSI ${f.rsi_strength ?? "-"}
+        (上位足 順${f.rsi_mtf_aligned ?? "-"}/逆${f.rsi_mtf_conflict ?? "-"}) /
+        SMA ${f.sma_strength ?? "-"} / SR ${f.sr_strength ?? "-"}</div>
+      <div class="k">押し目/戻り深さ</div><div>${(depth * 100).toFixed(1)}% (基準=直近スイング高安) ${depthOk}</div>
+      <div class="k">半分利確トリガー</div><div>${halfTrig} (RSI / SMA90 / SR のいずれか)</div>
+      <div class="k">rsi / band</div><div>現在 ${f.rsi} → 到達予測 ${f.rsi_band} (eta ${f.eta_bars} 本)</div>
+      <div class="k">指値の有効期限</div><div>発注 ${pt.place ? fmtD(snapTF(pt.place)) : "-"}
+        → 失効 ${pt.exp ? fmtD(pt.exp) : "-"}</div>
+      <div class="k">ambiguity</div><div>${f.ambiguity}</div>
+      <div class="k">価格構造</div><div>limit ${px(t.plan.limit).toFixed(2)} /
+        無効化 ${px(t.plan.invalidation).toFixed(2)} / W1 ${px(t.plan.w1_high).toFixed(2)} /
+        目標 ${px(t.plan.fib_target).toFixed(2)}</div>`;
 }
 function select(i) {
   if (i < 0 || i >= trades.length) return;
@@ -931,14 +1025,14 @@ function select(i) {
   // 退出が窓に収まらない長期保有は中点中心に広げる (両端が見えるように)
   if (xI - eI > win * 0.6) { win = Math.min(280, Math.max(win, (xI - eI) + 30)); center = Math.round((eI + xI) / 2); }
   chart.timeScale().setVisibleLogicalRange({ from: center - win / 2, to: center + win / 2 });
-  // 根拠ライン
+  // 根拠ライン (D.plan_lines 駆動。手法ごとに可変 — 表示可否制御)
   clearLines();
-  addLine(p.limit, "#26a69a", "指値(合流点)");
-  addLine(p.sl, "#ef5350", "SL初期", LightweightCharts.LineStyle.Solid);
-  addLine(p.invalidation, "#ff6d00", "エリオット無効化");
-  addLine(p.w1_high, "#2962ff", "第1波高値(追撃基準)");
-  addLine(p.fib_target, "#ab47bc", "フィボ161.8%目標");
+  (D.plan_lines || []).forEach(([key, label, color, style]) => {
+    const val = p[key];
+    if (val != null) addLine(val, color, label, LINE_STYLE[style]);
+  });
   // 選択トレードの根拠: FIB押し戻し水準 (38.2/50/61.8/78.6) と 近傍SRゾーン
+  // (narrow_focus 以外では fib_levels/sr_zones が常に空のため自然に無描画)
   const FR = ["38.2%", "50%", "61.8%", "78.6%"];
   (p.fib_levels || []).forEach((lv, k) =>
     addLine(lv, "#d4af37", "Fib " + (FR[k] || ""), LightweightCharts.LineStyle.Dotted));
@@ -946,34 +1040,26 @@ function select(i) {
     addLine(lo, "#4dd0e1", "SR" + (k + 1) + "下端", LightweightCharts.LineStyle.Dashed);
     addLine(hi, "#4dd0e1", "SR" + (k + 1) + "上端", LightweightCharts.LineStyle.Dashed);
   });
-  // 詳細パネル
+  // 詳細パネル: 汎用部分(常時) + 拡張部分(D.extras フラグで手法ごとに可変)
   const v = t.verdict ?? {};
   const f = t.features;
   const dir = t.dir;
-  const swHi = Math.max(p.w1_high, p.w1_low), swLo = Math.min(p.w1_high, p.w1_low);
-  const swSpan = swHi - swLo;
-  const depth = swSpan > 0 ? (dir > 0 ? (p.limit - swLo) : (swHi - p.limit)) / swSpan : 0;
-  const depthOk = depth <= 0.40 ? "✓深い(40%以内)" : "△浅い(40%超)";
-  const halfTrig = (t.journal.find(([n]) => n === "HALF_TAKE_PROFIT") || [null, {}])[1].trigger || "—";
-  // ④ グランビル近似 + SMA乖離% (エントリー足のチャートSMAから算出)
-  const eI2 = barIndexAtTime(curAgg, t.entry_time ?? t.exit_time);
-  const sma90v = curSma90[eI2], sma200v = curSma200[eI2];
-  const pricev = px(t.entries[0]?.[1] ?? curAgg.c[eI2]);
-  let gv = null, dev90 = null, dev200 = null;
-  if (sma90v != null) {
-    const k = Math.max(1, Math.min(3, eI2));
-    const slopeUp = sma90v - (curSma90[eI2 - k] ?? sma90v) >= 0;
-    gv = granvilleClassify(dir, pricev, sma90v, slopeUp);
-    dev90 = (pricev - sma90v) / sma90v * 100;
-  }
-  if (sma200v != null) dev200 = (pricev - sma200v) / sma200v * 100;
-  const devTxt = `SMA90 ${dev90 != null ? (dev90 >= 0 ? "+" : "") + dev90.toFixed(2) + "%" : "—"}` +
-    ` / SMA200 ${dev200 != null ? (dev200 >= 0 ? "+" : "") + dev200.toFixed(2) + "%" : "—"}`;
   const journey = t.journal.map(([n, pl]) => {
     const ps = Object.entries(pl).filter(([k]) => k !== "state")
       .map(([k, x]) => `${k}=${x}`).join(", ");
     return `<li><b>${n}</b> <span class="jr">${ps}</span></li>`;
   }).join("");
+  const EXTRAS = D.extras || [];
+  const hasDowPanel = EXTRAS.includes("dow_confluence_panel");
+  // 汎用: 価格構造(D.plan_lines駆動)。dow_confluence_panel は自前の同等行を
+  // 既に持つため重複させない(narrow_focus の表示を1ビットも変えないため)。
+  const priceStructure = hasDowPanel ? "" : `
+      <div class="k">価格構造</div><div>${(D.plan_lines || [])
+        .map(([key, label]) => `${label} ${px(p[key]).toFixed(2)}`).join(" / ")}</div>`;
+  // 汎用: features 一覧 (D.feature_fields 駆動。smc_bos 等の手法固有値)
+  const featureRows = (D.feature_fields || [])
+    .map(([key, label]) => `<div class="k">${label}</div><div>${f[key] ?? "-"}</div>`).join("");
+  const extraHtml = hasDowPanel ? renderDowConfluencePanel(t, p, f, dir, pt) : "";
   document.getElementById("detail-body").innerHTML = `
     <div class="kv">
       <div class="k">ID</div><div>${t.id}</div>
@@ -983,25 +1069,9 @@ function select(i) {
       <div class="k">ゲート判定</div><div>${v.decision ?? "-"} (conf=${v.confidence ?? "-"},
         source=${v.source ?? "-"})</div>
       <div class="k">判定理由</div><div><ul>${(v.reasons ?? []).map(r => `<li>${r}</li>`).join("")}</ul></div>
-      <div class="k">方向 / マクロ</div><div>${dir > 0 ? "買い" : "売り"} (ダウ ${f.dow_state}) /
-        マクロダウ ${f.macro_dow ?? "-"} / 第2波TF ${f.wave2_tf ?? "M5"}</div>
-      <div class="k">グランビル(近似)</div><div>${gv ? `<b>${gv.no}</b> ${gv.label}` : "—"}
-        <span class="jr">(SMA90基準・チャート足から推定)</span></div>
-      <div class="k">SMA乖離</div><div>${devTxt} <span class="jr">(エントリー足)</span></div>
-      <div class="k">コンフルエンス</div><div>${famPretty(f.families)}
-        <span class="jr">(cluster_score=${f.cluster_score})</span></div>
-      <div class="k">根拠強度</div><div>ダウ ${f.dow_strength ?? "-"} / RSI ${f.rsi_strength ?? "-"}
-        (上位足 順${f.rsi_mtf_aligned ?? "-"}/逆${f.rsi_mtf_conflict ?? "-"}) /
-        SMA ${f.sma_strength ?? "-"} / SR ${f.sr_strength ?? "-"}</div>
-      <div class="k">押し目/戻り深さ</div><div>${(depth * 100).toFixed(1)}% (基準=直近スイング高安) ${depthOk}</div>
-      <div class="k">半分利確トリガー</div><div>${halfTrig} (RSI / SMA90 / SR のいずれか)</div>
-      <div class="k">rsi / band</div><div>現在 ${f.rsi} → 到達予測 ${f.rsi_band} (eta ${f.eta_bars} 本)</div>
-      <div class="k">指値の有効期限</div><div>発注 ${pt.place ? fmtD(snapTF(pt.place)) : "-"}
-        → 失効 ${pt.exp ? fmtD(pt.exp) : "-"}</div>
-      <div class="k">ambiguity</div><div>${f.ambiguity}</div>
-      <div class="k">価格構造</div><div>limit ${px(t.plan.limit).toFixed(2)} /
-        無効化 ${px(t.plan.invalidation).toFixed(2)} / W1 ${px(t.plan.w1_high).toFixed(2)} /
-        目標 ${px(t.plan.fib_target).toFixed(2)}</div>
+      ${priceStructure}
+      ${featureRows}
+      ${extraHtml}
     </div>
     <h2 style="margin-top:10px">執行イベント</h2><ul>${journey}</ul>`;
 }
