@@ -304,7 +304,7 @@ register(StrategySpec(
 |---|---|---|---|
 | **S0** | 前提整備: `Timeframe.M30` 追加(L0)+ `indicators/ema.py` 新設(L1)+ 単体テスト。depth50 ビット一致確認 | 低(加算的) | **完了**(2026-06-20。[PR #1](https://github.com/seraphic0813/infers/pull/1)) |
 | **S1** | パススルー・ゲート(案A: `--ai-client none`)を CLI/gateway に追加。手法非依存・防御層不変 | 低〜中 | **完了**(2026-06-20。`infers/ai/passthrough.py` + `test_passthrough.py`。depth50 ビット一致再確認済み) |
-| **S2** | `strategies/smc_bos/` 実装(`structure.py`/`provider.py`/`execution.py`)。`be_mode=off`・`fixed_rr` の最小構成。レジストリ登録。単体+結合テスト | 中 | 未着手 |
+| **S2** | `strategies/smc_bos/` 実装(`structure.py`/`provider.py`/`execution.py`)。`be_mode=off`・`fixed_rr` の最小構成。レジストリ登録。単体+結合テスト | 中 | **完了**(2026-06-20。`SwingDetector`/`bos_direction`/`SmcBosProvider`/`SmcExecution`。単体30件(プロパティ1件含む)+ `--strategy smc_bos`のCLI解決確認。depth50 ビット一致再確認済み) |
 | **S3** | XAUUSD M30 データ export → 全期間バックテスト → `reports/smc_bos_full/`。出典との乖離分析 | 低(データ依存) | 未着手 |
 | **S4** | `be_mode=structure`(構造SL前進)実装 + SL単調性プロパティテスト。再検証 | 中 | 未着手 |
 | **S5(任意)** | HTF バイアス / CHoCH / トレーリング / ニュース・セッションフィルタ | 中 | 未着手 |

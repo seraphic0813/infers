@@ -102,3 +102,31 @@ register(StrategySpec(
     description="SMAクロス + 成行参入/固定TP/SL (Narrow Focus とは別の執行ライフサイクル。"
                 "TradingLoop が執行モデル非依存であることの実証用)",
 ))
+
+
+def _build_smc_bos(*, symbol: str, tf: Timeframe) -> SignalProvider:
+    """M30 SMC BOS + EMA80 手法の分析層 (段階S2。spec.md §5.1)。
+
+    判定TFはM30想定だが、レジストリの呼び出し規約に合わせ呼び出し元が渡す
+    tf をそのまま使う(CLI利用時は `--tf M30` を明示すること。spec.md §5.5)。
+    """
+    from infers.strategies.smc_bos.provider import SmcBosProvider
+    return SmcBosProvider(symbol=symbol, tf=tf)
+
+
+def _build_smc_execution(*, position_id, direction, broker, config,
+                         journal_sink=None) -> ExecutionModel:
+    """成行参入+固定SL/RR利確 の執行モデル生成器 (段階S2。spec.md §3.4)。"""
+    from infers.strategies.smc_bos.execution import SmcExecution
+    return SmcExecution(position_id=position_id, direction=direction,
+                        broker=broker, config=config, journal_sink=journal_sink)
+
+
+register(StrategySpec(
+    name="smc_bos",
+    build=_build_smc_bos,
+    build_execution=_build_smc_execution,
+    description="M30 SMC BOS(Break of Structure) + EMA80フィルタ (XAUUSD)。"
+                "構造ブレイク成行参入 + 固定SL/RR利確 (段階S2: SL前進はS4で追加)。"
+                "Narrow Focus / market_tpsl とは別の執行ライフサイクル",
+))
