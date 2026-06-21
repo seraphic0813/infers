@@ -218,6 +218,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="live: 起動時に歴史バーをプロバイダーへ食わせてウォームアップする本数 "
                         "(D1 ZigZag+Dow確立には約10本のD1スイングが必要: "
                         "M5換算で ~15000本(約3ヶ月)を推奨。既定 15000)")
+    p.add_argument("--terminal-path", metavar="PATH",
+                   help="live/export: 接続先MT5ターミナルのterminal64.exeパス。"
+                        "省略時はOS既定の起動中ターミナルに接続 "
+                        "(MetaTrader5パッケージの仕様: pathを明示しないと"
+                        "どのターミナルに繋がるか不定。複数ターミナルを同時稼働"
+                        "させる場合は手法ごとに別々のパスを明示すること)")
     p.add_argument("--journal", metavar="PATH",
                    help="live: 追記専用ジャーナル(イベントソーシング)JSONLの出力先 "
                         "(省略時 work/journal/<symbol>_<UTC日付>.jsonl)。"
@@ -647,12 +653,12 @@ def run_live(args: argparse.Namespace) -> int:
         return 2
 
     spec = SYMBOLS[args.symbol]
-    feed = MT5Feed()
+    feed = MT5Feed(terminal_path=args.terminal_path)
     broker = MT5LiveBroker(spec)
     journal = _open_live_journal(args)
     print(f"journal: {journal.path}")
     feed.connect()
-    broker.connect()
+    broker.connect(terminal_path=args.terminal_path)
     # 可変ロットサイジング (--risk-pct 指定時のみ有効)
     live_sizer = None
     if args.risk_pct is not None:
@@ -703,7 +709,7 @@ def run_export(args: argparse.Namespace) -> int:
     spec = SYMBOLS[args.symbol]
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=365 * args.years)
-    with MT5Feed() as feed:
+    with MT5Feed(terminal_path=args.terminal_path) as feed:
         count = export_history(feed, spec, Timeframe(args.tf), start, end, args.data)
     print(f"exported {count} candles -> {args.data}")
     return 0

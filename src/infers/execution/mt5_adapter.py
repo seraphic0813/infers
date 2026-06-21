@@ -142,14 +142,15 @@ class MT5LiveBroker:
         self._position_tickets: dict[str, int] = {}  # position_id → ticket
         self._last_poll = datetime.now(timezone.utc)
 
-    def connect(self) -> None:
+    def connect(self, *, terminal_path: str | None = None) -> None:
         if self._mt5 is not None:
             return
         try:
             import MetaTrader5 as mt5  # Windows専用・遅延 import
         except ImportError as e:
             raise FeedError("MetaTrader5 package not available") from e
-        if not mt5.initialize():
+        init_kwargs = {"path": terminal_path} if terminal_path else {}
+        if not mt5.initialize(**init_kwargs):
             raise FeedError(f"mt5.initialize failed: {mt5.last_error()}")
         self._mt5 = mt5
         self._autodetect_filling()
