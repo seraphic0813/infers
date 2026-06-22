@@ -53,6 +53,12 @@ class _WarmupProvider:
             self._inner.on_candle(candle)        # 戻り値は破棄 (発注しない)
             self._last_open = candle.open_time
             self.warmup_bars += 1
+        # 自己ミラー式の単一ポジション制約を持つプロバイダ (例: smc_bos) は
+        # on_candle 呼び出しだけで「建玉中」になり得る。発注を伴わないウォームアップ
+        # 後は必ずフラットへ戻す (手法固有の語彙を持たない汎用フック呼び出し)。
+        reset_mirror = getattr(self._inner, "reset_position_mirror", None)
+        if reset_mirror is not None:
+            reset_mirror()
         return self.warmup_bars
 
     def on_candle(self, candle):

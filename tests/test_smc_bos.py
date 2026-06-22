@@ -432,6 +432,27 @@ class TestSmcBosProvider:
         out2 = p.on_candle(mk(3, 1100, 1050, 1095))
         assert out2.plans == []
 
+    def test_reset_position_mirror_clears_phantom_position(self):
+        """ウォームアップ素通し (発注なし) で建玉ミラーが立った場合の後始末。
+
+        TP/SLいずれにも未到達のままでも reset_position_mirror() でフラットへ
+        戻り、新規BOS条件を満たす次の足で即発火する (2026-06 ライブ検証で
+        発生した「ウォームアップ中の歴史シグナルが以後ずっと新規プランを
+        ブロックする」バグの回帰防止)。"""
+        p = make_provider()
+        p._swing_high = 1030
+        p._swing_low = 970
+        p.on_candle(mk(0, 1010, 990, 1000))
+        p.on_candle(mk(1, 1020, 995, 1010))
+        out1 = p.on_candle(mk(2, 1045, 1025, 1040))
+        assert len(out1.plans) == 1   # 建玉 (sl=970, tp=1180)
+
+        p.reset_position_mirror()
+
+        # TP/SL未到達のままだが、ミラーがフラットなので新規BOSが即発火する
+        out2 = p.on_candle(mk(3, 1100, 1050, 1095))
+        assert len(out2.plans) == 1
+
     def test_resumes_after_mirrored_tp_touch(self):
         p = make_provider()
         p._swing_high = 1030

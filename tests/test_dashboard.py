@@ -198,6 +198,32 @@ class TestWarmupProvider:
         wp.on_candle(nxt)
         assert inner.seen[-1] == nxt.open_time  # 新しい足は委譲された
 
+    def test_warmup_calls_reset_position_mirror_hook(self):
+        """自己ミラー式プロバイダ (例: smc_bos) は warmup() 完了直後に
+        reset_position_mirror が呼ばれ、発注なしのウォームアップだけで
+        「建玉中」のまま固着しない (ファントム建玉バグの回帰防止)。"""
+        from infers.dashboard.controller import _WarmupProvider
+        from tests.test_integration import mk_candle
+
+        class _StubInnerWithMirror:
+            def __init__(self):
+                self.seen = []
+                self.reset_calls = 0
+
+            def on_candle(self, candle):
+                self.seen.append(candle.open_time)
+                return ProviderOutput()
+
+            def reset_position_mirror(self):
+                self.reset_calls += 1
+
+        hist = [mk_candle(i, 1005, 995, 1000) for i in range(5)]
+        feed = FakeFeed(hist)
+        inner = _StubInnerWithMirror()
+        wp = _WarmupProvider(inner)
+        wp.warmup(feed, GOLD, Timeframe.M5, days=3650)
+        assert inner.reset_calls == 1
+
     def test_warmup_days_zero_is_noop(self):
         from infers.dashboard.controller import _WarmupProvider
         from tests.test_integration import mk_candle
