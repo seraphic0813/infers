@@ -305,3 +305,30 @@ class TestServer:
         finally:
             ctrl.stop()
             httpd.shutdown()
+
+    def test_journals_lists_all_files_read_only(self, tmp_path, monkeypatch):
+        """/api/journals は新たなセッションを起動せず work/journal/*.jsonl を
+        全件列挙する (複数手法を別CLIプロセスで同時稼働させている場合の横並び
+        読み取り専用監視用)。"""
+        monkeypatch.chdir(tmp_path)
+        jdir = tmp_path / "work" / "journal"
+        jdir.mkdir(parents=True)
+        (jdir / "narrow_focus_xauusd.jsonl").write_text(
+            '{"seq":0,"wall_ts":"2026-06-21T00:00:00Z","kind":"SESSION","data":{}}\n',
+            encoding="utf-8")
+        (jdir / "smc_bos_xauusd.jsonl").write_text(
+            '{"seq":0,"wall_ts":"2026-06-21T00:00:00Z","kind":"SESSION","data":{}}\n',
+            encoding="utf-8")
+
+        httpd, _token = make_server(port=0, controller=_make_controller(blocking=True))
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            port = httpd.server_address[1]
+            j = json.loads(
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/journals").read())
+            names = {f["name"] for f in j["files"]}
+            assert names == {"narrow_focus_xauusd.jsonl", "smc_bos_xauusd.jsonl"}
+            assert all(f["exists"] for f in j["files"])
+        finally:
+            httpd.shutdown()
