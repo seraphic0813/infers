@@ -511,6 +511,13 @@ class LiveRunner:
         for candle in candles:
             self._provider.on_candle(candle)
             last_time = candle.open_time
+        # ウォームアップは発注しない素通しだが、自己ミラー式の単一ポジション制約
+        # (例: smc_bos) を持つプロバイダは on_candle 呼び出しだけで「建玉中」に
+        # なってしまう。発注を一切伴わないウォームアップ後は必ずフラットに戻す
+        # (手法固有の語彙を持たない汎用フック呼び出し。CLAUDE.md L0原則)。
+        reset_mirror = getattr(self._provider, "reset_position_mirror", None)
+        if reset_mirror is not None:
+            reset_mirror()
         print(f"[warm-up] fed {len(candles)} historical bars to provider",
               file=sys.stderr)
         return last_time

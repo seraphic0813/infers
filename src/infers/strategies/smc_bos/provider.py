@@ -18,6 +18,14 @@ narrow_focus/signals.py の共通語彙を market_tpsl と同じく流用)。Nar
 実際の約定・決済結果をプロバイダへ通知しないため。narrow_focus のクールダウン
 カウンタと同種の「自己申告ベースの抑制」であり、AIゲート拒否等で実際には
 約定しなかった場合にミラーが実態とズレる既知の限界も同様に持つ)。
+
+ライブ起動時のウォームアップ(歴史データを on_candle へ素通しして指標だけ
+育てる経路。発注はしない)も on_candle を直接呼ぶため、ウォームアップ窓内に
+本物のBOSシグナルが含まれているとミラーだけ「建玉中」になってしまい、
+実際には一度も発注していないのに以後ずっと新規プランがブロックされる
+(2026-06 ライブ検証で実際に発生)。`reset_position_mirror()` は呼び出し側
+(LiveRunner 等)がウォームアップ完了直後に呼び、ミラーをフラットへ戻すための
+専用フック。
 """
 
 from __future__ import annotations
@@ -91,6 +99,15 @@ class SmcBosProvider:
         self._swing_high: int | None = None
         self._swing_low: int | None = None
         self._position: _PositionMirror | None = None
+
+    def reset_position_mirror(self) -> None:
+        """建玉ミラーをフラットへ戻す(指標状態は維持)。
+
+        ライブ起動時のウォームアップ(発注しない歴史データ素通し)が
+        ミラーを誤って「建玉中」にしてしまうケースの後始末用。呼び出し側
+        (LiveRunner.warm_up_provider 等)がウォームアップ完了直後に呼ぶ。
+        """
+        self._position = None
 
     def on_candle(self, candle: Candle) -> SmcOutput:
         ema_val = self._ema.update(candle.c_int)

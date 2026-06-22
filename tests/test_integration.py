@@ -204,6 +204,58 @@ class TestLiveRunner:
         assert runner.loop.open_positions == {}
         assert broker.pending_count == 0
 
+    def test_warm_up_calls_reset_position_mirror_hook(self, monkeypatch):
+        """ウォームアップ完了直後、自己ミラー式プロバイダの reset_position_mirror が
+        ライブ処理開始より前に1回だけ呼ばれる (smc_bos のファントム建玉バグの
+        回帰防止。発注を伴わないウォームアップだけでミラーが「建玉中」になり、
+        以後ずっと新規プランがブロックされる事故を防ぐ)。"""
+        class _ResetTrackingProvider:
+            def __init__(self):
+                self.warmup_candles: list = []
+                self.live_candles: list = []
+                self.reset_called_at: int | None = None
+
+            def on_candle(self, candle):
+                if self.reset_called_at is None:
+                    self.warmup_candles.append(candle)
+                else:
+                    self.live_candles.append(candle)
+                return ProviderOutput()
+
+            def reset_position_mirror(self):
+                self.reset_called_at = len(self.warmup_candles)
+
+        history = [mk_candle(i, 1005, 995, 1000) for i in range(3)]
+        fake_now = history[-1].open_time + Timeframe.M5.duration
+        live = [mk_candle(i, 1005, 995, 1000) for i in range(10, 12)]
+        feed = FakeFeed(history + live)
+        provider = _ResetTrackingProvider()
+        broker = LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        runner = LiveRunner(
+            feed=feed, spec=GOLD, tf=Timeframe.M5, broker=broker,
+            provider=provider,
+            gateway=AiGateway(client=FakeClient(), cache=VerdictCache(), policy=POLICY),
+            risk=RiskManager(RiskConfig(max_position_volume_steps=4, max_total_volume_steps=8,
+                                        max_spread_ticks=10, daily_loss_limit_tick_steps=10_000)),
+            fsm_config=FsmConfig(min_be_distance_ticks=10, be_offset_ticks=2,
+                                 breakout_buffer_ticks=10),
+            event_source=broker.process_bar, spread_fn=lambda: 2,
+            warm_bars=3,
+        )
+
+        import infers.execution.mt5_adapter as mod
+
+        class _FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fake_now
+
+        monkeypatch.setattr(mod, "datetime", _FixedDatetime)
+
+        runner.run(max_bars=2)
+        assert provider.reset_called_at == len(history)
+        assert len(provider.live_candles) == 2
+
     def test_loop_delegates_to_execution_on_bar(self):
         """ループは既存ポジションの管理を ExecutionModel.on_bar へ完全委譲し、
         戻り値 BarOutcome に従って失効リカバリー (expired) とクローズ回収 (closed)
