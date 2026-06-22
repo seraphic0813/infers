@@ -13,11 +13,13 @@ import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from infers.dashboard import monitor
+from infers.dashboard import accounts, monitor
 from infers.dashboard.controller import LiveController
 
 
-def make_handler(controller: LiveController, *, token: str, default_symbol: str):
+def make_handler(controller: LiveController, *, token: str, default_symbol: str,
+                  account_specs: list[tuple[str, str | None]] | None = None):
+    account_specs = account_specs or [("既定", None)]
     class Handler(BaseHTTPRequestHandler):
         server_version = "InfersDashboard/1.0"
 
@@ -79,6 +81,27 @@ def make_handler(controller: LiveController, *, token: str, default_symbol: str)
                 jpath = (controller.status().get("journal_path")
                          or monitor.journal_path_for(self._symbol()))
                 self._send_json(monitor.summarize(jpath))
+            elif path == "/api/journals":
+                # work/journal/ 配下の全ジャーナルを読み取り専用で列挙 (複数手法/複数
+                # プロセスを別ターミナルでCLI稼働させている場合の横並び監視用。
+                # このダッシュボード自身は新たなセッションを起動しない)。
+                files = monitor.list_journal_files()
+                self._send_json({
+                    "files": [
+                        {"name": f.name, **monitor.summarize(f)}
+                        for f in files
+                    ]
+                })
+            elif path == "/api/accounts":
+                # 設定済みの全ターミナルへ読み取り専用で接続し、現在の口座情報
+                # (login/server/balance/equity) を都度取得して返す。発注APIには
+                # 触れない (accounts.account_snapshot 参照)。
+                self._send_json({
+                    "accounts": [
+                        accounts.account_snapshot(p, label=label)
+                        for label, p in account_specs
+                    ]
+                })
             else:
                 self._send_json({"error": "not found"}, status=404)
 
@@ -131,11 +154,14 @@ def make_handler(controller: LiveController, *, token: str, default_symbol: str)
 
 def make_server(*, port: int = 8765, default_symbol: str = "XAUUSD",
                 token: str | None = None,
-                controller: LiveController | None = None) -> tuple[ThreadingHTTPServer, str]:
+                controller: LiveController | None = None,
+                account_specs: list[tuple[str, str | None]] | None = None,
+                ) -> tuple[ThreadingHTTPServer, str]:
     """127.0.0.1 のみで待ち受けるサーバとトークンを返す。"""
     controller = controller or LiveController()
     token = token or secrets.token_urlsafe(16)
-    handler = make_handler(controller, token=token, default_symbol=default_symbol)
+    handler = make_handler(controller, token=token, default_symbol=default_symbol,
+                           account_specs=account_specs)
     httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
     return httpd, token
 
@@ -149,163 +175,88 @@ _INDEX_HTML = """<!DOCTYPE html>
 <style>
   :root { color-scheme: dark; }
   body { font-family: system-ui, sans-serif; background:#0e1117; color:#e6edf3;
-         margin:0; padding:24px; }
+         margin:0; padding:24px; max-width:980px; }
   h1 { font-size:20px; margin:0 0 16px; }
-  .grid { display:grid; grid-template-columns: 360px 1fr; gap:16px; align-items:start; }
-  .card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px; }
-  label { display:block; font-size:12px; color:#8b949e; margin:10px 0 4px; }
-  input, select { width:100%; box-sizing:border-box; padding:8px; background:#0d1117;
-                  color:#e6edf3; border:1px solid #30363d; border-radius:6px; }
-  button { margin-top:14px; padding:9px 14px; border:0; border-radius:6px;
-           font-weight:600; cursor:pointer; }
-  .start { background:#238636; color:#fff; }
-  .stop { background:#da3633; color:#fff; margin-left:8px; }
-  button:disabled { opacity:0.4; cursor:not-allowed; }
-  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; }
-  .on { background:#238636; } .off { background:#6e7681; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;
+          margin-bottom:16px; }
   table { width:100%; border-collapse:collapse; font-size:12px; }
   th,td { text-align:left; padding:4px 6px; border-bottom:1px solid #21262d; }
   .muted { color:#8b949e; font-size:12px; }
   .err { color:#f85149; }
   .ok { color:#3fb950; }
   code { background:#0d1117; padding:1px 5px; border-radius:4px; }
+  .acct-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+               gap:12px; }
+  .acct-card { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:10px; }
 </style>
 </head>
 <body>
-<h1>INFERS 監視ダッシュボード <span class="muted">(v1.0 / rule_depth50 / デモ専用)</span></h1>
-<div class="grid">
-  <div class="card">
-    <h3 style="margin-top:0">接続・起動</h3>
-    <label>操作トークン (起動時コンソールに表示)</label>
-    <input id="token" type="password" placeholder="X-Infers-Token">
-    <label>銘柄</label>
-    <select id="symbol"><option>XAUUSD</option><option>BTCUSD</option></select>
-    <label>口座番号 (login)</label>
-    <input id="login" inputmode="numeric" placeholder="例: 785662">
-    <label>パスワード</label>
-    <input id="password" type="password" placeholder="送信後フォームから消去されます">
-    <label>サーバ</label>
-    <input id="server" placeholder="例: VantageTradingLtd-Demo">
-    <label>ウォームアップ日数 (0=無効。D1/H1 200SMA を育てるには 300 推奨)</label>
-    <input id="warmup" inputmode="numeric" value="300">
-    <div>
-      <button id="btnStart" class="start" onclick="start()">監視開始</button>
-      <button id="btnStop" class="stop" onclick="stop()">安全停止</button>
-    </div>
-    <p class="muted">構成は v1.0 固定 (--macro-wave2 --depth-screen --depth-max 0.50
-      --no-fib-score)。資格情報はメモリ保持のみでディスクに保存しません。</p>
-    <p id="msg" class="muted"></p>
-  </div>
-  <div>
-    <div class="card">
-      <h3 style="margin-top:0">稼働ステータス
-        <span id="state" class="pill off">停止中</span></h3>
-      <table id="status"></table>
-    </div>
-    <div class="card" style="margin-top:16px">
-      <h3 style="margin-top:0">ジャーナル監視
-        <span class="muted">(自動更新: <span id="interval">10</span>秒)</span></h3>
-      <div id="golden" class="muted"></div>
-      <div id="positions"></div>
-      <h4>直近イベント</h4>
-      <table id="events"><thead><tr><th>seq</th><th>kind</th><th>bar_time</th>
-        <th>data</th></tr></thead><tbody></tbody></table>
-    </div>
-  </div>
+<h1>INFERS 監視ダッシュボード <span class="muted">(読み取り専用・トレード操作なし)</span></h1>
+<div class="card">
+  <h3 style="margin-top:0">現在接続中のMT5口座
+    <span class="muted">(読み取り専用・自動更新: 10秒)</span></h3>
+  <div id="accounts" class="muted">読み込み中...</div>
+</div>
+<div class="card">
+  <h3 style="margin-top:0">全ジャーナル一覧 (読み取り専用・work/journal/*.jsonl)
+    <span class="muted">(別ターミナルでCLI稼働中の手法も含む。自動更新: 10秒)</span></h3>
+  <div id="allJournals" class="muted">読み込み中...</div>
 </div>
 <script>
-// login/server/symbol はブラウザ localStorage に保存 (サーバ側ディスクには書かない)。
-// パスワードは保存しない。
-const PREFS='infers_dashboard_prefs';
-function loadPrefs(){
+function renderAccountBlock(a){
+  if(!a.connected){
+    return `<div class="acct-card"><strong>${a.label}</strong>
+      <div class="err">未接続: ${a.error||'unknown'}</div></div>`;
+  }
+  return `<div class="acct-card"><strong>${a.label}</strong>
+    <table>
+      <tr><th>login</th><td>${a.login}</td></tr>
+      <tr><th>server</th><td>${a.server}</td></tr>
+      <tr><th>balance</th><td>${a.balance} ${a.currency}</td></tr>
+      <tr><th>equity</th><td>${a.equity} ${a.currency}</td></tr>
+      <tr><th>leverage</th><td>1:${a.leverage}</td></tr>
+    </table></div>`;
+}
+async function refreshAccounts(){
   try {
-    const p = JSON.parse(localStorage.getItem(PREFS)||'{}');
-    if(p.login) document.getElementById('login').value = p.login;
-    if(p.server) document.getElementById('server').value = p.server;
-    if(p.symbol) document.getElementById('symbol').value = p.symbol;
-    if(p.token) document.getElementById('token').value = p.token;
-    if(p.warmup!=null) document.getElementById('warmup').value = p.warmup;
+    const a = await (await fetch('/api/accounts')).json();
+    const el = document.getElementById('accounts');
+    el.innerHTML = (a.accounts||[]).length
+      ? `<div class="acct-grid">${a.accounts.map(renderAccountBlock).join('')}</div>`
+      : '<span class="muted">設定済みターミナルがありません</span>';
   } catch(e){}
 }
-function savePrefs(){
-  const p = { login: document.getElementById('login').value,
-    server: document.getElementById('server').value,
-    symbol: document.getElementById('symbol').value,
-    token: document.getElementById('token').value,
-    warmup: document.getElementById('warmup').value };   // パスワードは保存しない
-  localStorage.setItem(PREFS, JSON.stringify(p));
+function renderJournalBlock(j){
+  const golden = j.ai_client==='rule'
+    ? (j.golden.ok
+        ? `<span class="ok">ゴールデンリプレイ OK (${j.golden.checked}件一致)</span>`
+        : `<span class="err">退行検出: ${JSON.stringify(j.golden.mismatches)}</span>`)
+    : '';
+  const pos = Object.entries(j.positions||{}).map(
+    ([pid,tl])=>`<div><code>${pid}</code> : ${tl.join(' → ')}</div>`).join('')
+    || '<span class="muted">ポジションなし</span>';
+  const rows = (j.recent_events||[]).slice(-10).reverse().map(e=>
+    `<tr><td>${e.seq}</td><td>${e.kind}</td><td>${e.bar_time||''}</td>
+     <td><code>${JSON.stringify(e.data).slice(0,140)}</code></td></tr>`).join('');
+  return `<div style="margin-bottom:14px">
+    <div><strong><code>${j.name}</code></strong> ${golden}</div>
+    <div>${pos}</div>
+    <table><thead><tr><th>seq</th><th>kind</th><th>bar_time</th><th>data</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+  </div>`;
 }
-function tok(){ return document.getElementById('token').value.trim(); }
-function msg(t, cls){ const m=document.getElementById('msg'); m.textContent=t;
-  m.className = cls||'muted'; }
-async function start(){
-  const body = { symbol: document.getElementById('symbol').value,
-    login: document.getElementById('login').value,
-    password: document.getElementById('password').value,
-    server: document.getElementById('server').value,
-    warmup_days: document.getElementById('warmup').value };
-  savePrefs();                                        // 入力値を保存 (PW除く)
-  const r = await fetch('/api/start', { method:'POST',
-    headers:{'Content-Type':'application/json','X-Infers-Token':tok()},
-    body: JSON.stringify(body) });
-  const j = await r.json();
-  document.getElementById('password').value = '';   // 即時消去
-  if(r.ok){ msg('監視を開始しました', 'ok'); } else { msg('開始失敗: '+(j.error||r.status), 'err'); }
-  refresh();
-}
-async function stop(){
-  const r = await fetch('/api/stop', { method:'POST',
-    headers:{'X-Infers-Token':tok()} });
-  const j = await r.json();
-  if(r.ok){ msg('安全停止しました', 'ok'); } else { msg('停止失敗: '+(j.error||r.status), 'err'); }
-  refresh();
-}
-async function refresh(){
+async function refreshAllJournals(){
   try {
-    const s = await (await fetch('/api/status')).json();
-    const st = document.getElementById('state');
-    const phaseLabel = s.phase==='warmup' ? 'ウォームアップ中'
-      : (s.phase==='live' ? '稼働中' : '停止中');
-    st.textContent = s.running ? phaseLabel : '停止中';
-    st.className = 'pill ' + (s.running ? 'on' : 'off');
-    document.getElementById('btnStart').disabled = s.running;
-    document.getElementById('btnStop').disabled = !s.running;
-    const off = (s.server_utc_offset_h==null) ? '-' : ('UTC+'+s.server_utc_offset_h);
-    const warm = (s.warmup_bars==null) ? '-' : (s.warmup_bars+' 本');
-    const rows = [['銘柄', s.symbol||'-'], ['フェーズ', phaseLabel],
-      ['開始(UTC)', s.started_at||'-'],
-      ['ウォームアップ本数', warm],
-      ['処理バー数(ライブ)', s.bars_processed], ['最終処理足(UTC)', s.last_bar_time||'-'],
-      ['サーバ時刻オフセット', off],
-      ['ジャーナル', s.journal_path||'-'], ['停止理由', s.stopped_reason||'-']];
-    document.getElementById('status').innerHTML =
-      rows.map(r=>`<tr><th>${r[0]}</th><td>${r[1]}</td></tr>`).join('') +
-      (s.last_error ? `<tr><th>エラー</th><td class="err">${s.last_error}</td></tr>` : '');
+    const j = await (await fetch('/api/journals')).json();
+    const el = document.getElementById('allJournals');
+    el.innerHTML = (j.files||[]).length
+      ? j.files.map(renderJournalBlock).join('<hr style="border-color:#30363d">')
+      : '<span class="muted">work/journal/ にファイルがありません</span>';
   } catch(e){}
 }
-async function refreshJournal(){
-  try {
-    const j = await (await fetch('/api/journal')).json();
-    const g = document.getElementById('golden');
-    if(j.ai_client==='rule'){
-      g.innerHTML = j.golden.ok
-        ? `<span class="ok">ゴールデンリプレイ OK (${j.golden.checked}件一致・退行なし)</span>`
-        : `<span class="err">退行検出: ${JSON.stringify(j.golden.mismatches)}</span>`;
-    } else { g.textContent=''; }
-    const pos = Object.entries(j.positions||{}).map(
-      ([pid,tl])=>`<div><code>${pid}</code> : ${tl.join(' → ')}</div>`).join('');
-    document.getElementById('positions').innerHTML =
-      pos || '<span class="muted">ポジションなし</span>';
-    const tb = document.querySelector('#events tbody');
-    tb.innerHTML = (j.recent_events||[]).slice().reverse().map(e=>
-      `<tr><td>${e.seq}</td><td>${e.kind}</td><td>${e.bar_time||''}</td>
-       <td><code>${JSON.stringify(e.data).slice(0,160)}</code></td></tr>`).join('');
-  } catch(e){}
-}
-loadPrefs();
-setInterval(refresh, 2000);
-setInterval(refreshJournal, 10000);
-refresh(); refreshJournal();
+setInterval(refreshAccounts, 10000);
+setInterval(refreshAllJournals, 10000);
+refreshAccounts(); refreshAllJournals();
 </script>
 </body>
 </html>

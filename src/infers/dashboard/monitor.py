@@ -19,6 +19,19 @@ def journal_path_for(symbol: str, *, day: datetime | None = None) -> Path:
     return Path("work/journal") / f"{symbol}_{stamp}.jsonl"
 
 
+def list_journal_files(directory: str | Path = "work/journal") -> list[Path]:
+    """ジャーナルディレクトリ内の *.jsonl を新しい順に列挙する。
+
+    複数手法(複数CLIプロセス)が並行稼働しジャーナルパスをそれぞれ明示する運用
+    (例: narrow_focus_xauusd.jsonl / smc_bos_xauusd.jsonl)を、手法名を一切
+    ハードコードせず横並びで読み取り専用表示するための列挙ヘルパ。
+    """
+    d = Path(directory)
+    if not d.is_dir():
+        return []
+    return sorted(d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
 def count_bars(path: str | Path) -> int:
     """一意な bar_time の本数 (進捗の軽量代理。status の高頻度 polling 用)。"""
     p = Path(path)
