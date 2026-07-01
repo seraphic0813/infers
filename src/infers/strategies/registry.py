@@ -17,6 +17,7 @@ from infers.core.execution import ExecutionModel
 from infers.core.loop import SignalProvider
 from infers.core.models import Timeframe
 from infers.core.report_spec import StrategyReportSpec
+from infers.strategies.atr_trend_scalp.report import ATR_TREND_SCALP_REPORT_SPEC
 from infers.strategies.narrow_focus.report import NARROW_FOCUS_REPORT_SPEC
 from infers.strategies.smc_bos.report import SMC_BOS_REPORT_SPEC
 
@@ -138,4 +139,34 @@ register(StrategySpec(
                 "構造ブレイク成行参入 + 固定SL/RR利確 (段階S2: SL前進はS4で追加)。"
                 "Narrow Focus / market_tpsl とは別の執行ライフサイクル",
     report_spec=SMC_BOS_REPORT_SPEC,
+))
+
+
+def _build_atr_trend_scalp(*, symbol: str, tf: Timeframe) -> SignalProvider:
+    """M5 ハイブリッドATRトレンドフォロー・スキャルピングの分析層 (spec.md §2)。
+
+    判定TFはM5想定だが、レジストリ規約に合わせ呼び出し元が渡す tf をそのまま使う
+    (CLI利用時は `--tf M5` を明示。上位足M15は provider 内部でリサンプルする)。
+    """
+    from infers.strategies.atr_trend_scalp.provider import AtrTrendScalpProvider
+    return AtrTrendScalpProvider(symbol=symbol, tf=tf)
+
+
+def _build_atr_trend_execution(*, position_id, direction, broker, config,
+                               journal_sink=None) -> ExecutionModel:
+    """成行参入 + 50/50分割(TP1半利+建値化+0.5×ATRトレール+TP2)の執行モデル生成器。"""
+    from infers.strategies.atr_trend_scalp.execution import AtrTrendExecution
+    return AtrTrendExecution(position_id=position_id, direction=direction,
+                             broker=broker, config=config, journal_sink=journal_sink)
+
+
+register(StrategySpec(
+    name="atr_trend_scalp",
+    build=_build_atr_trend_scalp,
+    build_execution=_build_atr_trend_execution,
+    description="XAUUSD M5 ハイブリッドATRトレンドフォロー・スキャルピング。"
+                "EMA9/21クロス + EMA21押し目 + ATR/出来高フィルタ + 上位足(M15)EMA50バイアスで"
+                "成行参入。50/50分割(TP1半利+建値化+0.5×ATRトレール+TP2)。"
+                "Narrow Focus / market_tpsl / smc_bos とは別の執行ライフサイクル",
+    report_spec=ATR_TREND_SCALP_REPORT_SPEC,
 ))
