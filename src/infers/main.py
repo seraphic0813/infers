@@ -318,6 +318,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "省略時は ProviderConfig.probe_volume_steps の固定ロット。"
                         "指定時は 残高 × risk_pct ÷ SL距離 で発注ステップ数を算出し、"
                         "残高が増えると自動的にロットが増える (資産比例型サイジング)")
+    p.add_argument("--min-volume-steps", type=int, default=2,
+                   help="--risk-pct 使用時の最低保証ロットステップ (既定2=Narrow Focus系の"
+                        "半分利確が2step以上を要求するための下限)。"
+                        "半分利確を持たない手法(例: atr_trend_scalp)+小口座では、"
+                        "SL距離が広い足でリスク目標を大幅に超過する原因になるため 1 に"
+                        "下げられる (VolumeSizerConfig.min_volume_steps を直接上書き)")
     p.add_argument("--min-be-distance", type=int, default=None,
                    help="建値SL移動を許可する最小スイング距離 (ticks)。"
                         "省略時は既定値(10 ticks=$0.10)。"
@@ -475,7 +481,7 @@ def run_backtest(args: argparse.Namespace) -> int:
         volume_sizer = VolumeSizer(VolumeSizerConfig(
             risk_pct=Decimal(str(args.risk_pct)),
             tick_value_per_step=tick_value,
-            min_volume_steps=2,
+            min_volume_steps=args.min_volume_steps,
             max_volume_steps=DEFAULT_RISK.max_position_volume_steps,
         ))
         equity_provider = BacktestEquityProvider(
@@ -667,7 +673,7 @@ def run_live(args: argparse.Namespace) -> int:
         live_sizer = VolumeSizer(VolumeSizerConfig(
             risk_pct=Decimal(str(args.risk_pct)),
             tick_value_per_step=tick_val,
-            min_volume_steps=2,
+            min_volume_steps=args.min_volume_steps,
             max_volume_steps=DEFAULT_RISK.max_position_volume_steps,
         ))
         print(f"sizing: risk={args.risk_pct*100:.1f}%  tick_value={tick_val}/tick/step")
