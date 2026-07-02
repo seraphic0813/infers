@@ -914,3 +914,61 @@ class TestReconcileCadence:
         reasons = [r.data["reason"] for r in recs]
         assert "startup" in reasons and "periodic" in reasons
         assert all(r.data["ok"] for r in recs)            # 一致スナップショット → 全て ok
+
+
+class TestLiveRunnerExecutionFactory:
+    """LiveRunner の execution_factory 配線 (段階2.5・ライブ経路の回帰防止)。
+
+    かつて LiveRunner は execution_factory を受け取れず、--strategy 指定時も
+    ライブは常定の NarrowFocusExecution にフォールバックしていた
+    (バックテストのみ TradingLoop へ配線されていた欠落)。atr_trend_scalp を
+    ライブ投入する際に発覚し修正。ここでは execution_factory を明示注入した
+    LiveRunner が、既定 (NarrowFocusExecution) ではなく指定した執行モデルを
+    実際に使うことを確認する。
+    """
+
+    def test_custom_execution_factory_used_instead_of_narrow_focus_default(self):
+        from infers.strategies.atr_trend_scalp.execution import AtrTrendExecution
+        from infers.strategies.atr_trend_scalp.signals import AtrTrendPlan
+
+        def atr_execution_factory(*, position_id, direction, broker, config,
+                                  journal_sink=None):
+            return AtrTrendExecution(position_id=position_id, direction=direction,
+                                     broker=broker, config=config,
+                                     journal_sink=journal_sink)
+
+        plan = AtrTrendPlan(
+            plan_id="atrlive1", direction=+1, limit_price_int=1000, volume_steps=2,
+            sl_int=980, expiry=FAR, invalidation_price=980, fib_target_int=1040,
+            tp1_int=1010, trail_distance_ticks=5, atr_at_entry_int=20,
+            request=JudgementRequest(kind=JudgementKind.ENTRY_GATE, symbol="XAUUSD",
+                                     direction=+1, features={"tag": "atr_live"}),
+            cluster_score=Decimal(3), ambiguity=Decimal(0))
+
+        candles = [mk_candle(0, 1005, 995, 1000), mk_candle(1, 1005, 995, 1000)]
+        script = {1: ProviderOutput(plans=[plan])}
+        broker = LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        runner = LiveRunner(
+            feed=FakeFeed(candles), spec=GOLD, tf=Timeframe.M5, broker=broker,
+            provider=ScriptedProvider(script),
+            gateway=AiGateway(client=FakeClient(), cache=VerdictCache(), policy=POLICY),
+            risk=RiskManager(RiskConfig(max_position_volume_steps=4, max_total_volume_steps=8,
+                                        max_spread_ticks=10, daily_loss_limit_tick_steps=10_000)),
+            fsm_config=FsmConfig(min_be_distance_ticks=10, be_offset_ticks=2,
+                                 breakout_buffer_ticks=10),
+            event_source=broker.process_bar,
+            spread_fn=lambda: 2,
+            execution_factory=atr_execution_factory,
+        )
+        runner.run(max_bars=len(candles))
+        execution, _ = runner.loop.open_positions["atrlive1"]
+        assert isinstance(execution, AtrTrendExecution)
+
+    def test_default_execution_factory_is_narrow_focus(self):
+        """execution_factory 未指定なら従来どおり NarrowFocusExecution (1ビット不変)。"""
+        from infers.strategies.narrow_focus.execution import NarrowFocusExecution
+
+        runner, broker = make_runner(FakeClient())
+        runner.run(max_bars=2)
+        execution, _ = runner.loop.open_positions["live1"]
+        assert isinstance(execution, NarrowFocusExecution)

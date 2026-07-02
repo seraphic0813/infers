@@ -686,6 +686,7 @@ def run_live(args: argparse.Namespace) -> int:
             journal=journal,
             warm_bars=args.warm_bars,
             volume_sizer=live_sizer,
+            execution_factory=build_execution_factory(args),
         )
         try:
             bars = runner.run(max_bars=args.max_bars)
