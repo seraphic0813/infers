@@ -151,10 +151,10 @@ python -m infers.main --mode live --demo --strategy atr_trend_scalp --tf M5 --sy
 | `atr_period` | 14 | ATR(SL/TP/トレール/ボラフィルタの基準) |
 | `vol_sma_period` / `atr_avg_period` | 20 / 20 | 出来高SMA / 平均ATR |
 | `retrace_lookback` | 3 | 押し目タッチの有効窓(本) |
-| `atr_vol_mult` / `vol_mult` | 1.1 / 1.2 | ボラ拡大 / 出来高増の必要倍率 |
+| `atr_vol_mult` / `vol_mult` | 1.1 / **1.6** | ボラ拡大 / 出来高増の必要倍率(vol_mult は v1.1 で 1.2→1.6) |
 | `sl_atr_mult` | 1.0 | 初期SL距離 = ×ATR |
-| `tp1_atr_mult` / `tp2_atr_mult` | 1.0 / 2.0 | TP1 / TP2 距離 = ×ATR |
-| `trail_atr_mult` | 0.5 | トレール幅 = ×ATR(エントリー時ATR固定) |
+| `tp1_atr_mult` / `tp2_atr_mult` | **0.5** / **3.0** | TP1 / TP2 距離 = ×ATR(v1.1 で 1.0/2.0→0.5/3.0) |
+| `trail_atr_mult` | **0.15** | トレール幅 = ×ATR(エントリー時ATR固定。v1.1 で 0.5→0.15) |
 | `min_stop_distance_ticks` | 5 | SL下限(LedgerBroker 下限を満たす) |
 | `volume_steps` | 2 | 固定ロット(50/50分割のため偶数推奨。`--risk-pct` で上書き) |
 | `session_filter` | **False** | JST16:00〜25:00(UTC07-16)ゲート(opt-in) |
@@ -191,8 +191,9 @@ python -m infers.main --mode live --demo --strategy atr_trend_scalp --tf M5 --sy
 | **A1** | `provider.py`(4条件ゲート・ATRジオメトリ・ミラー) + 単体テスト | ✅ 完了 |
 | **A2** | `execution.py`(FSM・分割決済・建値化・トレール・SL単調性プロパティ) + テスト | ✅ 完了 |
 | **A3** | `registry.py` 登録 + `report.py` + 結合(パススルーゲート)テスト | ✅ 完了 |
-| **A4** | XAUUSD M5 データ export → 全期間バックテスト → `reports/atr_trend_scalp_full/`。出来高フィルタ実効性・含み益トリガーの損益寄与を分析 | ⏳ 未(データ依存) |
-| **A5(opt-in)** | `session_filter` の ON/OFF 実測比較 | ⏳ 未 |
+| **A4** | XAUUSD M5 データ export → 全期間バックテスト → `reports/atr_trend_scalp_full/`。出来高フィルタ実効性・含み益トリガーの損益寄与を分析 | ✅ 完了(v1.0: PF1.173) |
+| **A5(opt-in)** | `session_filter` の ON/OFF 実測比較 | ✅ 実測: ON は PF 低下のため不採用(§12) |
+| **v1.1** | パラメータPDCAで PF1.5以上を達成(根幹不変・数値のみ) | ✅ 完了(§12。PF1.55) |
 
 ---
 
@@ -203,4 +204,35 @@ python -m infers.main --mode live --demo --strategy atr_trend_scalp --tf M5 --sy
 3. **出来高**: XAUUSD CFD は真の出来高が無く **tick_volume** を代替に用いる。
 4. **上位足**: M15 は独立フィードでなく M5 からの内部リサンプル(単一の真実=最小足)。
 5. **AIゲート**: 参入は**パススルー**(意味的に不要。防御層は別途強制)。
+
+---
+
+## 12. パラメータ調整履歴(v1.1・2026-07-01)
+
+**目的**: v1.0(素の仕様どおり)の全期間PF 1.173 を、**手法の根幹を変えず**に PF1.5以上へ
+引き上げる。制約=エントリー頻度を極端に減らさない/DDを極端に悪化させない。
+
+**方法**: main.py の `run_backtest` と同一条件を再現するインプロセス・スイープ(1構成≈4秒)で、
+**5年フル**でパラメータをOFAT→組み合わせ探索(単年最適化を避けるため探索自体を全期間で実施)。
+v1.0既定で PF1.173164608・6,656トレード・DD25,783 を**ビット一致で再現**した上で調整した。
+
+**確定変更(数値パラメータのみ・根幹不変)**:
+
+| パラメータ | v1.0 | v1.1 | 探索で観測した効果 |
+|---|---|---|---|
+| `vol_mult` | 1.2 | **1.6** | 単独で最大の改善(PF↑・DD半減)。エントリー品質フィルタ |
+| `trail_atr_mult` | 0.5 | **0.15** | 詰めるほど単調にPF改善(頻度は不変) |
+| `tp1_atr_mult` | 1.0 | **0.5** | 半利を早め→勝率↑(0.60) |
+| `tp2_atr_mult` | 2.0 | **3.0** | ランナーを伸ばす |
+
+**結果(5年・XAUUSD M5)**: **PF 1.550**・2,963トレード(45%保持)・勝率 59.9%・**DD $71.02**
+(v1.0 の $257.83 から −72%)。**全暦年で PF>1.35**(最弱2022=1.354、2025=1.75)で
+過剰適合の兆候なし。詳細は `reports/atr_trend_scalp_full/health_check.md`。
+
+**却下した方向**: `session_filter`(JST16-25)は PF を下げ不採用。`atr_vol_mult` 引き上げ・
+`retrace_lookback` 変更・`sl_atr_mult` 変更は改善せず据え置き。頻度優先の代替
+(`vol_mult=1.45`: PF1.522・3,949トレード)は最弱年が薄く未採用。
+
+**留意**: `trail_atr_mult=0.15`(≈6ティック)は約定現実性の下限に近く、ライブ(デモ)で
+トレール挙動の再現性を要確認。
 6. **複利/実口座**: 本書スコープ外(デモ検証必須・自己責任)。

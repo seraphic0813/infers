@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
 from infers.ai.gateway import AiGateway
+from infers.core.execution import ExecutionModel
 from infers.core.loop import ProviderOutput, SignalProvider, TradingLoop
 from infers.data.feed import FeedError, MarketFeed
 from infers.core.models import Candle, SymbolSpec, Timeframe
@@ -421,6 +422,7 @@ class LiveRunner:
         reconcile_every_bars: int = 12,           # 定期リコンサイル間隔 (0=無効。M5で12=1時間)
         warm_bars: int = 0,                       # 起動前にプロバイダーへ食わせる歴史バー数 (0=無効)
         volume_sizer=None,                        # VolumeSizer | None
+        execution_factory: "Callable[..., ExecutionModel] | None" = None,
     ) -> None:
         self._feed = feed
         self._spec = spec
@@ -438,7 +440,8 @@ class LiveRunner:
                                 expiry_sink=getattr(provider, "notify_probe_expired",
                                                     None),
                                 volume_sizer=volume_sizer,
-                                equity_provider=equity_prov)
+                                equity_provider=equity_prov,
+                                execution_factory=execution_factory)
         # リコンサイルの継続実行 (フェーズ8 #6): 起動時に加え、稼働中も
         # (a) 定期 (reconcile_every_bars 本ごと) と (b) フィード再接続復帰直後に
         # 状態を再同期する。再接続検知はフィードの reconnect_count 増分で行う。

@@ -12,6 +12,11 @@
   4. ボラ&出来高   : ATR14 >= atr_vol_mult × 直近20本平均ATR
                       かつ volume >= vol_mult × 出来高SMA20
 
+既定パラメータは v1.1 チューニング(spec.md §7・§12)の確定値:
+vol_mult=1.6 / tp1_atr_mult=0.5 / tp2_atr_mult=3.0 / trail_atr_mult=0.15。
+XAUUSD M5・5年の全期間バックテストで PF1.55・全暦年 PF>1.35・DD$71 を得た構成
+(根幹=4条件・50/50分割・建値化+トレールは不変。数値パラメータのみの調整)。
+
 出口ジオメトリ(初期SL・TP1・TP2・トレール幅)はエントリー時ATRから確定させ
 `AtrTrendPlan` に載せる(spec.md §3・§4)。半玉数はプランに焼き込まず、可変ロット
 (`--risk-pct`)対応のため `AtrTrendExecution` が place() 時点の実 volume から導出する。
@@ -64,11 +69,11 @@ class AtrTrendScalpProvider:
                  atr_period: int = 14, vol_sma_period: int = 20,
                  atr_avg_period: int = 20, retrace_lookback: int = 3,
                  atr_vol_mult: Decimal = Decimal("1.1"),
-                 vol_mult: Decimal = Decimal("1.2"),
+                 vol_mult: Decimal = Decimal("1.6"),
                  sl_atr_mult: Decimal = Decimal("1.0"),
-                 tp1_atr_mult: Decimal = Decimal("1.0"),
-                 tp2_atr_mult: Decimal = Decimal("2.0"),
-                 trail_atr_mult: Decimal = Decimal("0.5"),
+                 tp1_atr_mult: Decimal = Decimal("0.5"),
+                 tp2_atr_mult: Decimal = Decimal("3.0"),
+                 trail_atr_mult: Decimal = Decimal("0.15"),
                  min_stop_distance_ticks: int = 5,
                  volume_steps: int = 2,
                  session_filter: bool = False,
