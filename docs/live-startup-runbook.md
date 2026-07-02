@@ -7,6 +7,8 @@ narrow_focus・smc_bos・atr_trend_scalp の3手法を、別々のMT5デモ口�
 **`scripts\start_live.bat`(ダブルクリック)/ `scripts\start_live.ps1` が
 この手順を自動化している。** 通常はそちらを使えばよく、以下は内部で
 何が起きているかの説明と、手動操作が必要な場合の手順。
+停止は `scripts\stop_live.bat`(ダブルクリック)/ `scripts\stop_live.ps1` —
+3手法のPythonプロセスと対応するMT5ターミナル3つをまとめて停止する。
 
 ## 前提
 
