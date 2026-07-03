@@ -4,6 +4,10 @@
 - スプレッド: 買いの約定は ask (= bid + spread) 基準で再現
 - 最小ストップ距離: ブローカー制約を発注前に検証 (設計書 §6.5 #6)
 - SL判定は保守側: 同一バーで約定とSL接触が併発した場合もSLを執行する
+- スリッページ (opt-in・既定0): 成行約定と保護SL決済の約定価格を不利方向へ
+  slippage_ticks ずらす約定現実性のストレステスト。**指値約定は指値価格の契約
+  (不利方向には滑らない) のため対象外**。slippage_ticks=0 で全経路が従来と
+  1ティックも変わらない (既定経路の不汚染)。
 """
 
 from __future__ import annotations
@@ -58,11 +62,14 @@ class SimBroker:
     イントラバーの到達順序は解決しない (M1解決はフェーズ7のbacktestエンジン)。
     """
 
-    def __init__(self, *, spread_ticks: int, min_stop_distance_ticks: int) -> None:
-        if spread_ticks < 0 or min_stop_distance_ticks < 0:
-            raise ValueError("spread/min_stop must be >= 0")
+    def __init__(self, *, spread_ticks: int, min_stop_distance_ticks: int,
+                 slippage_ticks: int = 0) -> None:
+        if spread_ticks < 0 or min_stop_distance_ticks < 0 or slippage_ticks < 0:
+            raise ValueError("spread/min_stop/slippage must be >= 0")
         self.spread = spread_ticks
         self.min_stop = min_stop_distance_ticks
+        # 約定現実性ストレステスト用の逆方向スリッページ (既定0=無効=従来挙動)。
+        self.slippage = slippage_ticks
         self._seen_order_ids: set[str] = set()
         self._pending: dict[str, _PendingLimit] = {}
         self._positions: dict[str, _Position] = {}
@@ -108,10 +115,14 @@ class SimBroker:
 
     def place_market(self, *, client_order_id: str, position_id: str, direction: int,
                      volume_steps: int, sl_int: int) -> int:
-        """成行注文。直近確定足終値 ± spread で即時約定し、約定価格を返す。"""
+        """成行注文。直近確定足終値 ± (spread + slippage) で即時約定し、約定価格を返す。
+
+        参入は不利方向 (買い=高値側 / 売り=安値側) へ spread + slippage ずれる。
+        slippage=0 で従来の `close + direction*spread` と完全一致。
+        """
         if self._last_close_int is None:
             raise BrokerRejection("no market data yet — call process_bar first")
-        fill = self._last_close_int + direction * self.spread
+        fill = self._last_close_int + direction * (self.spread + self.slippage)
         if self._idempotent(client_order_id):
             pos = self._positions[position_id]
             return pos.avg_entry_int
@@ -137,7 +148,8 @@ class SimBroker:
         if pos is None or volume_steps > pos.volume_steps:
             raise BrokerRejection("close volume exceeds position")
         assert self._last_close_int is not None
-        fill = self._last_close_int - pos.direction * self.spread
+        # 決済は不利方向 (買い決済=安値側 / 売り決済=高値側) へ spread + slippage ずれる。
+        fill = self._last_close_int - pos.direction * (self.spread + self.slippage)
         pos.volume_steps -= volume_steps
         if pos.volume_steps == 0:
             del self._positions[position_id]
@@ -173,15 +185,19 @@ class SimBroker:
                 ))
 
         # 2) SL判定 (約定後にも評価 = 同一バー併発は保守側でSL執行)
+        #    保護SL/トレールのヒットは不利方向 (買い=SLより安値 / 売り=SLより高値) へ
+        #    slippage ずれる (ストップが市場成行化して滑る現実の再現)。slippage=0 で
+        #    従来の SL丸め・滑りなしと完全一致。
         for pid in list(self._positions):
             pos = self._positions[pid]
             hit = (candle.l_int <= pos.sl_int) if pos.direction > 0 else (candle.h_int >= pos.sl_int)
             if hit:
                 volume = pos.volume_steps
+                fill = pos.sl_int - pos.direction * self.slippage
                 del self._positions[pid]
                 events.append(BrokerEvent(
                     kind="SL_HIT", client_order_id=f"{pid}/slhit",
-                    position_id=pid, price_int=pos.sl_int, volume_steps=volume,
+                    position_id=pid, price_int=fill, volume_steps=volume,
                 ))
         return events
 

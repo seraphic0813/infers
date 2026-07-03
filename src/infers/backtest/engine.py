@@ -54,9 +54,11 @@ class _Ledger:
 class LedgerBroker(SimBroker):
     """SimBroker に約定台帳を重ねる (FSMからは通常の BrokerPort に見える)。"""
 
-    def __init__(self, *, spread_ticks: int, min_stop_distance_ticks: int) -> None:
+    def __init__(self, *, spread_ticks: int, min_stop_distance_ticks: int,
+                 slippage_ticks: int = 0) -> None:
         super().__init__(spread_ticks=spread_ticks,
-                         min_stop_distance_ticks=min_stop_distance_ticks)
+                         min_stop_distance_ticks=min_stop_distance_ticks,
+                         slippage_ticks=slippage_ticks)
         self.ledgers: dict[str, _Ledger] = {}
         self._bar_time: datetime | None = None   # 現在処理中バーの close_time
 
