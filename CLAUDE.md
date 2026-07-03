@@ -15,7 +15,18 @@
 - **目的**: 複数のトレード手法を Python 自動取引Bot+長期バックテストとして実装・比較できるプラットフォーム。各手法は自前の分析(`SignalProvider`)と執行ライフサイクル(`ExecutionModel`)を差し替えられる
 - **対象**: BTCUSD (Vantage Trading)、XAUUSD (Swift Trader) — いずれも MT4/MT5系ブローカー
 - **アーキテクチャ**: 6層 — L0 core(手法非依存の実行コア・ブローカー/執行抽象)/ L1 indicators(汎用インジケーター)/ L2 strategies(手法ごとの分析+執行)/ L3 backtest / L4 frontend / L5 live。手法は `strategies/registry.py` の `StrategySpec` で名前登録し `--strategy <名前>` で選択。**L0 は手法固有の語彙を一切持たない**(`TradingLoop` は `ExecutionModel` 抽象のみに依存)。詳細は phase2 設計書
-- **登録済み手法**: `narrow_focus` / `depth50`(基準実装・既定執行モデル)、`market_tpsl`(SMAクロス+成行/固定TP-SL。執行抽象が手法非依存であることの実証用に、Narrow Focus とは別の執行ライフサイクルを持つ)、`smc_bos`(XAUUSD M30、SMC BOS+EMA80フィルタ+成行/固定RR利確。詳細は [smc_bos/spec.md](src/infers/strategies/smc_bos/spec.md))
+- **登録済み手法**(手法×口座×TF×役割×確定実測値。詳細は [docs/improvement-plan-2026-07.md](docs/improvement-plan-2026-07.md)):
+
+| 手法 | 口座/資産/TF | 役割 | 確定実測(直近) |
+|---|---|---|---|
+| `narrow_focus` / `depth50` | XAUUSD M5(既定口座) | **コア(防御的・基準実装)** | PF 1.487396352 / 624トレード / DD $325.77 / 勝率53.37%(v1.0確定ベースライン) |
+| `market_tpsl` | — | **運用非対象**(執行抽象が手法非依存であることの実証用。SMAクロス+成行/固定TP-SL) | — |
+| `smc_bos` | XAUUSD M30(2口座目) | **ライブ凍結(2026-07-03)**。SMC BOS+EMA80フィルタ+成行/固定RR利確。年次分解で平常年(2022年PF0.801)赤字・2026年依存が確定し稼働停止(詳細・再開条件は [smc_bos/spec.md](src/infers/strategies/smc_bos/spec.md)「ライブ凍結ステータス」節) | 全期間PF 1.456322103(年次フロア不合格) |
+| `atr_trend_scalp` | XAUUSD M5(3口座目) | **コア(攻撃的)**。ハイブリッドATRトレンドフォロー・スキャルピング(建値化+トレール)。実口座昇格はスリッページ耐性・デモ約定検証が条件(詳細は [atr_trend_scalp/spec.md](src/infers/strategies/atr_trend_scalp/spec.md)) | PF 1.550419248 / 2,963トレード / DD $71.02 / 勝率59.91%(全暦年PF>1.35) |
+
+**手法はマージされて main に入って初めて「登録済み」とみなす。** 未マージのブランチ上の実装を
+本表・CLAUDE.md に「登録済み」と記載しない(過去に atr_trend_scalp が未マージのまま記載され
+齟齬が生じた経緯があるため)。
 - **Narrow Focus 手法のエントリー手法(正は [narrow_focus/entry-methodology.md](src/infers/strategies/narrow_focus/entry-methodology.md))**: 3ゲート構成 — ①マクロ環境認識(**ダウ理論(D1/H1)で方向を確定**、200SMA位置で確認。逆方向を100%遮断)→ ②コンフルエンス(ダウ順行・**200SMAグランビル**・90SMAグランビル・水平レジサポ・**RSIマルチTF(M5/H1/D1)**・**40%深さスクリーニング** が規定数以上重複)→ ③ニュース遮断(重要指標±30分は全面見送り)。エリオット波動は第2波の構造文脈、フィボは**押し目ゾーン特定+利確目標161.8%**(エントリー加点にはしない)。40%深さは原典に無いシステム化の追加フィルター。**この節は Narrow Focus 手法の契約であって、他手法には適用されない**
 
 ## 開発環境
@@ -32,7 +43,26 @@
 2. その手法専用の計算は手法フォルダ内に置く。**複数手法で使うようになった汎用インジケーターのみ** `indicators/` へ吸い上げる。
 3. `strategies/registry.py` に `StrategySpec` を1件 `register(...)`。執行を差し替えるなら `build_execution=` を指定、Narrow Focus 既定でよければ `None`。HTMLレポート(`--report`)の凡例・根拠ライン・トレード詳細を手法に合わせたい場合は `report.py` に `core.report_spec.StrategyReportSpec` を1件定義し `report_spec=` で渡す(省略時は `GENERIC_REPORT_SPEC` の汎用表示にフォールバックする。`backtest/report_html.py` は手法固有の語彙を一切持たない)。
 4. 手法の方法論文書・バックテストレポートはその手法フォルダ配下に置く(`docs/` に置かない)。
-5. **既存手法の挙動を変えていないこと**を `pytest` 全合格 + depth50 バックテストのビット完全一致で確認してからコミットする。
+5. **既存手法の挙動を変えていないこと**を `pytest` 全合格 + depth50 バックテストのビット完全一致で確認してからコミットする(`/bit-check` Skill でワンコマンド検証できる。黄金値は下記「完了ゲート」節)。
+6. **新パラメータ・新フィルタ・新手法の採否は、全期間1本の指標(PF等)だけで判断しない。** 年次分解(`/annual-breakdown` Skill、`tools/annual_breakdown.py`)を行い、(a) 単年の純益寄与が全期間純益の50%を超えていないか、(b) いずれかの暦年でPFが0.9を下回っていないかを確認する。採否基準は実験前に事前宣言し、結果を見てから基準を後出しで変更しない(`smc_bos` の頻度レバー実験・全期間PF神話が3回にわたり同型の過剰適合を生んだ教訓。詳細は [docs/improvement-report-2026-07.md](docs/improvement-report-2026-07.md))。
+
+## 完了ゲート(全変更の合否判定)
+
+すべての変更(新手法追加・リファクタリング・AI層の縮小等)は次の**両方**を満たして初めて完了とする。
+`/bit-check` Skill がこれをワンコマンドで検証する:
+
+1. `pytest` 全合格。
+2. depth50 再現バックテスト(下記コマンド)が以下の黄金値と**完全一致**(トレード列に加え、
+   AIゲート統計の内訳=「強い一致」まで含む。理由: ゲート統計まで一致させることで、経路を
+   変えたが特定データではたまたま結果が同じだった、という見落としを防ぐ):
+   - PF `1.487396352` / トレード数 `624` / 最大DD `$325.77` / 勝率 `53.37%`
+   - AIゲート統計: `CACHE:GO=3124` / `CACHE:NO_GO=1034`
+
+```
+python -m infers.main --mode backtest --data data/xauusd_m5.parquet \
+  --verdict-cache work/cache/verdicts_depth50.sqlite3 \
+  --macro-wave2 --depth-screen --depth-max 0.50 --no-fib-score
+```
 
 ## 主要コマンド(2026-06-20 実装に合わせて確定)
 
@@ -43,15 +73,18 @@ docstring)。手法は `--strategy <名前>`(レジストリ登録名)で選択�
 
 | コマンド | 用途 |
 |---|---|
-| `pytest` / `pytest -m property` | 単体テスト / hypothesis プロパティテスト(状態機械の不変条件)。331件合格(2026-06-20) |
+| `pytest` / `pytest -m property` | 単体テスト / hypothesis プロパティテスト(状態機械の不変条件)。418件合格(2026-07時点) |
 | `python -m infers.main --mode backtest --data <parquet> [--strategy <名前>] [--report DIR] ...` | L0決定論スイープ+ルールベース($0)/キャッシュ済みverdictでのバックテスト。v1.0確定構成は `reports/README.md` 再生成コマンド参照。期間スライスは `--from`/`--to`/`--last` |
-| `python -m infers.main --mode judge --data <parquet> --batch [--tier L1\|L2]` | Pass1: 裁定イベントをBatch APIリクエスト(JSONL)に書き出す |
-| `python -m infers.main --mode judge --submit` / `--fetch <BATCH_ID>` / `--ingest <results.jsonl>` | Batches API投入/結果取得/取込 → `verdict_cache`へ永続化 |
+| `python -m infers.main --mode backtest --data data/xauusd_m5.parquet --strategy atr_trend_scalp --ai-client none --report reports/atr_trend_scalp_full` | atr_trend_scalp(3口座目候補)の再現バックテスト例。詳細は [atr_trend_scalp/spec.md](src/infers/strategies/atr_trend_scalp/spec.md) |
+| `python -m infers.main --mode judge --data <parquet> --batch [--tier L1\|L2]` | Pass1: 裁定イベントをBatch APIリクエスト(JSONL)に書き出す(**現状不使用。撤去候補**。下記AI層規約参照) |
+| `python -m infers.main --mode judge --submit` / `--fetch <BATCH_ID>` / `--ingest <results.jsonl>` | Batches API投入/結果取得/取込 → `verdict_cache`へ永続化(**現状不使用。撤去候補**) |
 | `python -m infers.main --mode replay --data <parquet> --verdict-cache <db>` | Pass2: verdict_cache参照の最終リプレイ(`backtest`と同一実装) |
 | `python -m infers.main --mode live --demo [--symbol XAUUSD] [--max-bars N] [--journal PATH]` | ライブ稼働(デモ必須。実口座は`--allow-real-account`明示が必要)。判断は追記専用ジャーナル(既定 `work/journal/<symbol>_<UTC日付>.jsonl`)へ永続化 |
 | `python -m infers.journal replay --file <path> [--from <ts>]` | ジャーナルの要約 + ゴールデン回帰検証(ルールゲートのセッションは記録済み特徴量を `judge_features` へ再投入し同一判断を確認)。実装は `src/infers/journal.py` |
 | `python -m infers.main --mode export --data <out.parquet> --years 5` | MT5からヒストリカルデータをParquetへ書き出し |
 | `python -m infers.dashboard [--port 8765] [--symbol XAUUSD]` | ローカル監視ダッシュボード(127.0.0.1のみ・標準ライブラリのみ・トレード根幹から分離)。ブラウザから口座情報入力・監視開始/安全停止・ジャーナル監視。内部はlive稼働と同一経路を呼ぶだけ。資格情報はメモリ保持のみ。実装は `src/infers/dashboard/` |
+| `/bit-check` Skill | 完了ゲート(pytest全合格+depth50強いビット一致)のワンコマンド検証 |
+| `/annual-breakdown <report_dir>` Skill(`tools/annual_breakdown.py`) | レポートの年次分解+過剰適合警告(定石6) |
 
 - テストはCIで `pytest` 全件を必須とする。状態機械・注文ロジックの変更はプロパティテスト追加なしにマージしない。
 - ゴールデンリプレイ(同一入力→同一判断の回帰検証)は `tests/test_journal.py` でカバー。ルールゲート($0・決定論)のセッションについて、ジャーナルの特徴量スナップショットから判定が再現されることを検証する。LLMゲート(`--ai-client claude`)は非決定論のため対象外。
@@ -85,13 +118,11 @@ docstring)。手法は `--strategy <名前>`(レジストリ登録名)で選択�
 10. **イベントソーシング** — 全判断を特徴量スナップショットとともに追記専用ジャーナルへ記録。「ログに出してない判断」を作らない。
 11. **戦略コアは純粋関数** — I/O(フィード・ブローカー・LLM)はアダプタに隔離し、バックテストとライブで同一コードパスを通す。`TradingLoop` は `ExecutionModel` 抽象のみに依存し、特定手法の執行手順を直接呼ばない。
 
-#### AI層規約
-12. **LLMにインジケーター計算をさせない** — 渡すのは事前計算済み数値特徴量のみ。生ローソク足・生チャートを渡さない。
-13. モデルIDは `claude-haiku-4-5`(L1) / `claude-fable-5`(L2)。Fable 5 は `thinking={"type": "adaptive"}` + `output_config={"effort": "high"}`、sampling パラメータ(`temperature` 等)と明示 `thinking disabled` は400になるので渡さない。
-14. システムプロンプト(手法マニュアル+判定ルール)は凍結し `cache_control` でキャッシュ。揮発要素(時刻・乱数)を混ぜない。可変部は `sort_keys=True` でJSON決定論化。
-15. バックテストのLLM呼び出しは必ず2パス+Batches API+`verdict_cache`(key=(model, prompt_version, feature_hash))経由。同期ループ内で `messages.create` を直接呼ばない。
-
-> **既知の制約(フェーズ3候補)**: 現状のAIゲート(`rule_judge.py`)は Narrow Focus 固有の特徴量を前提とするため、別手法の plan は GUARDRAIL NO_GO になる。ゲートを手法非依存へ一般化するのが次の論点(防御層は全手法に等しく強制されるため、これは安全性ではなく約定可否の問題)。**暫定回避策**: `--ai-client none`(`infers.ai.passthrough`)で常時GOのパススルー・ゲートに切替可能(`market_tpsl`・`smc_bos` 等のバックテスト用)。これはゲートを「無効化」する迂回であり、上記の本筋(手法ごとに必要な特徴量・ゲート要否を Strategy 側が宣言する一般化)を代替しない。
+#### AI層規約(現行方針: LLM/AI 不使用)
+12. **トレード判定に LLM は現在不使用・当面再導入しない(正式方針)**。全手法は決定論ゲートで運用する: `narrow_focus`/`depth50` は `ai/rule_judge.py`($0・決定論のルールベースゲート。verdict_cache 併用)、他手法は `--ai-client none`(`infers.ai.passthrough`。常時GOのパススルー・ゲート)。
+13. LLM実呼び出し系(`AnthropicLlmClient`・`ai/batch.py`・`--mode judge` の `--batch`/`--submit`/`--fetch`/`--ingest`)は**撤去対象**(改善プラン T6)。決定論ゲート本体(`AiGateway`・`VerdictCache`・`EscalationPolicy`・`rule_judge.py`・`passthrough.py`)はこれらとは別物であり、depth50 の稼働経路そのものなので**不可侵**(撤去しない)。
+14. `TradingLoop.on_candle` は全プランへゲート呼び出しを強制する構造が現状も残る。`narrow_focus` 以外の手法は Narrow Focus 固有特徴量(`cluster_score`/`ambiguity` 等)を中立値で埋めてゲートを通過している(既知の境界違反。改善プラン T15「ゲートの手法宣言化」で `StrategySpec.gate`(既定 `None`=ゲート呼び出しなし)へ縮退させる計画。narrow_focus 経路の呼び出し列・キャッシュキー・統計は不変に保つことが完了ゲート)。
+15. **将来 LLM を再導入する場合**は本節末尾の「付録: LLM再導入時の凍結規約」に従うこと(モデルID・プロンプトキャッシュ・2パス+Batches API+verdict_cache の設計は凍結保存済み)。
 
 ### B. Narrow Focus 手法固有の契約(変更禁止の定義)
 
@@ -103,3 +134,14 @@ docstring)。手法は `--strategy <名前>`(レジストリ登録名)で選択�
 - **「第1波高値超え」** = 判定TF確定足終値 > `W1_high + max(α_atr×ATR, n_ticks, spread×m)`(設計書 §6.2)。
 - **半分利確** は `half_volume`/`runner_volume` をエントリー時に固定し、厳密に1回のみ(設計書 §6.4)。
 - **未来裁量の指値** には必ず `expiry` と `invalidation_price` を付け、毎確定足で再計算する(設計書 §5.5)。
+
+## 付録: LLM再導入時の凍結規約
+
+現行方針(トレード判定にLLM不使用。上記 A-12〜15)により**現在は適用対象外**だが、将来 LLM を
+再導入する場合に備えて設計を凍結保存する(改善プラン T6 でのAI層撤去はこの設計自体を否定しない)。
+
+- **LLMにインジケーター計算をさせない** — 渡すのは事前計算済み数値特徴量のみ。生ローソク足・生チャートを渡さない。
+- モデルIDは `claude-haiku-4-5`(L1) / `claude-fable-5`(L2)。Fable 5 は `thinking={"type": "adaptive"}` + `output_config={"effort": "high"}`、sampling パラメータ(`temperature` 等)と明示 `thinking disabled` は400になるので渡さない。
+- システムプロンプト(手法マニュアル+判定ルール)は凍結し `cache_control` でキャッシュ。揮発要素(時刻・乱数)を混ぜない。可変部は `sort_keys=True` でJSON決定論化。
+- バックテストのLLM呼び出しは必ず2パス+Batches API+`verdict_cache`(key=(model, prompt_version, feature_hash))経由。同期ループ内で `messages.create` を直接呼ばない。
+- 詳細設計は [docs/phase1-architecture.md](docs/phase1-architecture.md) §7(要件4: ハイブリッドAI判断層)を参照(凍結仕様として保存。再導入時のみ参照する)。
