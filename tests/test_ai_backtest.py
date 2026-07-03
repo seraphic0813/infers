@@ -1,11 +1,14 @@
-"""AI Gateway・Batch連携・2パスバックテストエンジンのテスト。"""
+"""AI Gateway・2パスバックテストエンジンのテスト。
+
+Batch API連携(旧ai/batch.py)はLLM実呼び出し系として改善プランT6で撤去済み
+(トレード判定にLLMは現在不使用。CLAUDE.md A-12)。
+"""
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
-from infers.ai.batch import build_batch_request, ingest_batch_results, write_batch_file
 from infers.ai.gateway import (
     AiGateway, EscalationPolicy, JudgementKind, JudgementRequest, Tier,
     Verdict, VerdictCache, cache_key,
@@ -136,67 +139,6 @@ class TestGateway:
         assert client.calls == {"L1": 1, "L2": 1}      # 2件目はL1も呼ばれない
         gw.new_day()
         assert gw.l2_calls_today == 0
-
-
-# ---------------------------------------------------------------------------
-# Batch API 連携 (パス1 → パス2)
-# ---------------------------------------------------------------------------
-
-class TestBatch:
-    def test_write_batch_file_dedupes(self, tmp_path):
-        items = [(req(tag="a"), "L1"), (req(tag="a"), "L1"), (req(tag="b"), "L2")]
-        path = tmp_path / "batch.jsonl"
-        assert write_batch_file(items, path, system_prompt="SYS") == 2
-        lines = path.read_text(encoding="utf-8").strip().splitlines()
-        assert len(lines) == 2
-
-    def test_l2_request_shape(self):
-        entry = build_batch_request(req(), "L2", "SYS")
-        assert entry["custom_id"] == cache_key(req(), "L2")
-        p = entry["params"]
-        assert p["model"] == "claude-fable-5"
-        assert p["thinking"] == {"type": "adaptive"}
-        assert p["output_config"]["effort"] == "high"
-        # structured outputs: Verdict スキーマの強制 (これがないと結果が自由文になる)
-        assert p["output_config"]["format"]["type"] == "json_schema"
-        assert "decision" in p["output_config"]["format"]["schema"]["properties"]
-        assert p["system"][0]["cache_control"] == {"type": "ephemeral"}
-
-    def test_l1_request_has_output_format_without_effort(self):
-        p = build_batch_request(req(), "L1", "SYS")["params"]
-        assert p["output_config"]["format"]["type"] == "json_schema"
-        assert "effort" not in p["output_config"]
-        assert "thinking" not in p
-
-    def test_confidence_schema_is_number_only(self):
-        """confidence の anyOf[number, string] は string 分岐に制約が効かず、
-        decision の値 ("NO_GO" 等) がそのまま confidence に出力されても
-        構造化出力の検証を通過してしまう (実バッチで観測)。
-        number 一本に絞り、型レベルで非数値出力を排除する。"""
-        schema = build_batch_request(req(), "L1", "SYS")["params"]["output_config"]["format"]["schema"]
-        confidence = schema["properties"]["confidence"]
-        assert confidence["type"] == "number"
-        assert "anyOf" not in confidence
-
-    def test_ingest_results_into_cache_then_no_api(self):
-        """Batch結果取込後のリプレイは外部APIを一切叩かない。"""
-        import json
-        key = cache_key(req(), "L1")
-        ok_line = json.dumps({
-            "custom_id": key,
-            "result": {"type": "succeeded",
-                       "message": {"content": [{"type": "text",
-                                                "text": GO.model_dump_json()}]}},
-        })
-        err_line = json.dumps({"custom_id": "x", "result": {"type": "errored"}})
-        cache = VerdictCache()
-        assert ingest_batch_results([ok_line, err_line, "not-json"], cache) == 1
-
-        client = FakeClient()
-        gw = make_gateway(client, cache)
-        v = gw.judge(req(), cluster_score=Decimal(3), ambiguity=Decimal(1))
-        assert v.decision == "GO" and v.source == "CACHE"
-        assert client.calls == {"L1": 0, "L2": 0}      # ★ API呼び出しゼロ
 
 
 # ---------------------------------------------------------------------------

@@ -72,7 +72,7 @@ class TestCliWiring:
     def test_ai_client_none_returns_go_for_smc_features(self):
         from infers.main import _build_gateway
         args = argparse.Namespace(ai_client="none", verdict_cache=":memory:")
-        gw = _build_gateway(args, cache_only=True)
+        gw = _build_gateway(args)
         v = gw.judge(_smc_request(), cluster_score=Decimal(3), ambiguity=Decimal(0))
         assert v.decision == "GO"
 

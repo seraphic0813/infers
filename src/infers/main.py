@@ -1,24 +1,20 @@
 """INFERS 統合エントリーポイント (フェーズ8〜10)。
 
-  python -m infers.main --mode judge    --data data/xauusd_m5.parquet   # Pass1
-  python -m infers.main --mode judge    --ingest batch_results.jsonl    # 結果取込
-  python -m infers.main --mode replay   --data data/xauusd_m5.parquet   # Pass2
-  python -m infers.main --mode backtest --data data/xauusd_m5.parquet   # replay同義
+  python -m infers.main --mode backtest --data data/xauusd_m5.parquet
+  python -m infers.main --mode replay   --data data/xauusd_m5.parquet   # backtest同義
   python -m infers.main --mode live --demo
   python -m infers.main --mode export --data out.parquet --years 5
 
-2パスバックテスト (CLAUDE.md 第16条):
-  - backtest/replay はキャッシュ専用 — 同期ループ内で messages.create を呼ばない。
-    キャッシュ未解決の判断はガードレール NO_GO になり、件数がレポートに出る
-  - judge: L0決定論スイープで未解決の裁定イベントを Batch API リクエスト
-    (JSONL) に書き出す。--submit で投入、--fetch <batch_id> で結果を
-    verdict_cache へ永続化 (--ingest はローカル結果ファイルからの取込)
+AI層 (CLAUDE.md A-12): トレード判定にLLMは現在不使用(正式方針)。ゲートは
+決定論のみ — narrow_focus/depth50 は `ai/rule_judge.py`($0・ルールベース。
+verdict_cache 併用)、他手法は `--ai-client none`(常時GOのパススルー)。
+LLM実呼び出し系(Batches API・2パス収集モード)は撤去済み(改善プラン T6)。
 
 安全ガード:
   - live モードは --demo が既定。実口座は --allow-real-account の明示が必須
   - SignalProvider は "module:factory" 形式で注入する。既定は
     InfersSignalProvider。NullProvider (監視のみ・発注ゼロ) へ差し替え可能
-  - APIキー・口座資格情報は環境変数のみ (ANTHROPIC_API_KEY 等)
+  - APIキー・口座資格情報は環境変数のみ
 """
 
 from __future__ import annotations
@@ -30,9 +26,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from infers.ai.gateway import (
-    PROMPT_VERSION, AiGateway, AnthropicLlmClient, EscalationPolicy, VerdictCache,
-)
+from infers.ai.gateway import PROMPT_VERSION, AiGateway, EscalationPolicy, VerdictCache
 from infers.ai.rule_judge import RuleBasedLlmClient
 from infers.core.loop import ProviderOutput, SignalProvider
 from infers.core.models import Candle, SymbolSpec, Timeframe
@@ -46,9 +40,7 @@ SYMBOLS: dict[str, SymbolSpec] = {
                          lot_step=Decimal("0.01"), digits=2),
 }
 
-DEFAULT_POLICY = EscalationPolicy(score_l1=Decimal(2), score_l2=Decimal(4),
-                                  ambiguity_gray=Decimal("0.1"), l2_daily_call_cap=3)
-# ルールベースゲートは $0 のため L2 予算キャップが不要 (キャップは Claude 課金対策)。
+# ルールベースゲートは $0 のため L2 予算キャップが不要 (キャップは旧Claude課金対策)。
 # キャップを残すと L2_AFTER_L1 案件が日次4件目以降 GUARDRAIL NO_GO に化ける。
 RULE_POLICY = EscalationPolicy(score_l1=Decimal(2), score_l2=Decimal(4),
                                ambiguity_gray=Decimal("0.1"),
@@ -57,22 +49,6 @@ DEFAULT_RISK = RiskConfig(max_position_volume_steps=4, max_total_volume_steps=8,
                           max_spread_ticks=50, daily_loss_limit_tick_steps=50_000)
 DEFAULT_FSM = FsmConfig(min_be_distance_ticks=10, be_offset_ticks=2,
                         breakout_buffer_ticks=10)
-
-
-class CacheMissError(LookupError):
-    """replay/backtest 中に verdict_cache 未解決の判断へ到達した。"""
-
-
-class CacheOnlyClient:
-    """バックテスト用クライアント: LLMを呼ばず常にキャッシュミスを通知する。
-
-    AiGateway のガードレールが NO_GO (DEFAULT NO-TRADE) に変換するため、
-    キャッシュ未解決の判断は安全側へ倒れる (CLAUDE.md 第1・16条)。
-    未解決件数はゲートウェイの guardrail_reasons に集計される。
-    """
-
-    def judge(self, request, tier: str):  # noqa: ARG002 — 契約上のシグネチャ
-        raise CacheMissError("verdict cache miss (run --mode judge first)")
 
 
 class NullProvider:
@@ -169,7 +145,7 @@ def resolve_report_spec(args: argparse.Namespace):
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="infers", description="INFERS trading system")
-    p.add_argument("--mode", choices=["backtest", "judge", "replay", "live", "export"],
+    p.add_argument("--mode", choices=["backtest", "replay", "live", "export"],
                    required=True)
     p.add_argument("--symbol", choices=sorted(SYMBOLS), default="XAUUSD")
     p.add_argument("--tf", choices=[t.value for t in Timeframe], default="M5")
@@ -183,36 +159,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "フラグ(--depth-max 等)を無視し、レジストリ登録済みの構成を"
                         "そのまま使う。省略時は従来のフラグ組み立て経路(挙動不変)")
     p.add_argument("--verdict-cache", default="work/cache/verdicts.sqlite3")
-    p.add_argument("--ai-client", choices=["rule", "claude", "none"], default="rule",
+    p.add_argument("--ai-client", choices=["rule", "none"], default="rule",
                    help="エントリーゲートの判定方式。既定は rule_judge.py の"
                         "決定論ルール ($0, narrow_focus_v3.md §5 実装)。"
-                        "claude は旧Claude L1/L2ゲート (Batches API 経由)。"
                         "none は手法非依存のパススルー(常時GO。Narrow Focus 固有特徴量"
                         "を前提としない別手法 — market_tpsl/smc_bos 等 — のバックテスト用。"
-                        "防御層は不変。spec.md §5.7 案A)")
-    p.add_argument("--system-prompt-file", help="LLM用システムプロンプト (凍結ファイル)")
+                        "防御層は不変。spec.md §5.7 案A)。トレード判定にLLMは現在"
+                        "不使用のため LLM経由のゲートは選択肢に無い(CLAUDE.md A-12)")
     p.add_argument("--years", type=int, default=5, help="export: 取得年数")
-    # 2パスバックテスト (judge = Pass1 / replay = Pass2。CLAUDE.md 第16条)
-    p.add_argument("--batch", action="store_true",
-                   help="judge: 未解決の裁定イベントをJSONLへ書き出す (既定動作の明示)")
-    p.add_argument("--tier", choices=["L1", "L2"],
-                   help="judge: 2段階収集。L1 (Haiku) を先に投入・取込し、"
-                        "L1=GO のプランのみ --tier L2 (Fable 5) を投入する"
-                        "(省略時は一括収集 = L2課金が最大)")
-    p.add_argument("--batch-file", default="batch_requests.jsonl",
-                   help="judge: Batch APIリクエストJSONLの出力パス")
-    p.add_argument("--submit", action="store_true",
-                   help="judge: 書き出したリクエストを Batches API へ投入する")
-    p.add_argument("--fetch", metavar="BATCH_ID",
-                   help="judge: Batches API から結果を取得し verdict_cache へ永続化")
-    p.add_argument("--save-raw", metavar="PATH",
-                   help="judge --fetch: 取得した生結果JSONLの保存先 "
-                        "(省略時は <batch_id>.results.jsonl。常に保存される)")
-    p.add_argument("--ingest", metavar="RESULTS_JSONL",
-                   help="judge: ローカルの結果JSONLを verdict_cache へ取込")
-    p.add_argument("--limit", type=int, metavar="N",
-                   help="judge: 投入リクエストを先頭N件に制限する "
-                        "(本番投入前の少額パイロット検証用)")
     p.add_argument("--max-bars", type=int, help="live: 処理バー数上限 (検証用)")
     p.add_argument("--warm-bars", type=int, default=15000,
                    help="live: 起動時に歴史バーをプロバイダーへ食わせてウォームアップする本数 "
@@ -341,30 +295,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-_DEFAULT_SYSTEM_PROMPT_PATH = (
-    Path(__file__).resolve().parent / "ai" / "prompts" / "narrow_focus_v3.md")
-
-
-def _load_system_prompt(args: argparse.Namespace) -> str:
-    path = (Path(args.system_prompt_file) if args.system_prompt_file
-            else _DEFAULT_SYSTEM_PROMPT_PATH)
-    return path.read_text(encoding="utf-8")
-
-
-def _build_gateway(args: argparse.Namespace, *, cache_only: bool) -> AiGateway:
+def _build_gateway(args: argparse.Namespace) -> AiGateway:
     """既定はルールベースゲート (rule_judge.py: narrow_focus_v3.md §5 の
-    決定論実装、$0・同期呼び出し可)。`--ai-client claude` で旧LLMゲートに
-    切替可能 — その場合 cache_only=True (backtest/replay) では LLM
-    クライアントを配線しない (CLAUDE.md 第16条: 同期ループ内で
-    messages.create を呼ばない)。`--ai-client none` は手法非依存のパススルー
+    決定論実装、$0・同期呼び出し可)。`--ai-client none` は手法非依存のパススルー
     (spec.md §5.7 案A。market_tpsl/smc_bos 等、Narrow Focus 固有特徴量を
-    前提としない手法のバックテスト用。$0・同期呼び出し可なので cache_only
-    に関わらず常時利用可能)。"""
-    if args.ai_client == "claude":
-        client = CacheOnlyClient() if cache_only else AnthropicLlmClient(
-            _load_system_prompt(args))
-        policy = DEFAULT_POLICY
-    elif args.ai_client == "none":
+    前提としない手法のバックテスト用)。どちらも純粋関数的でLLMを呼ばない
+    ($0・例外なし。CLAUDE.md A-12: トレード判定にLLMは現在不使用)。"""
+    if args.ai_client == "none":
         from infers.ai.passthrough import PASSTHROUGH_POLICY, PassthroughLlmClient
         client = PassthroughLlmClient()
         policy = PASSTHROUGH_POLICY
@@ -385,12 +322,6 @@ def _print_gateway_stats(gateway: AiGateway) -> None:
               + "  ".join(f"{k}={v}" for k, v in sorted(gateway.stats.items())))
     for reason, n in sorted(gateway.guardrail_reasons.items()):
         print(f"  guardrail[{reason}] = {n}")
-    misses = sum(n for r, n in gateway.guardrail_reasons.items()
-                 if "CacheMissError" in r)
-    if misses:
-        print(f"warning: {misses} 件の判断が verdict_cache 未解決 (NO_GO扱い)。"
-              f" --mode judge → Batch実行 → --mode judge --fetch/--ingest"
-              f" で解決してから replay してください", file=sys.stderr)
 
 
 def _with_progress(candles: list[Candle], *, every: int = 5000):
@@ -445,7 +376,7 @@ def run_backtest(args: argparse.Namespace) -> int:
             return 2
         print(f"period: {before}本 → {len(candles)}本"
               f" ({candles[0].open_time.isoformat()} 〜 {candles[-1].open_time.isoformat()})")
-    gateway = _build_gateway(args, cache_only=True)
+    gateway = _build_gateway(args)
 
     recorder = None
     if args.report:
@@ -525,104 +456,6 @@ def run_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_judge(args: argparse.Namespace) -> int:
-    """Pass1: 裁定イベント収集→JSONL書き出し (+投入/取込) (設計書 §7.4)。"""
-    from infers.ai.batch import (
-        ingest_batch_results, ingest_batch_results_file, write_batch_file,
-    )
-    from infers.backtest.engine import BacktestEngine
-    from infers.data.exporter import load_history
-
-    from collections import Counter
-
-    cache = VerdictCache(args.verdict_cache)
-
-    def _report_ingest(count: int, stats: Counter, source: str) -> None:
-        print(f"ingested {count} verdicts from {source} -> {args.verdict_cache}")
-        breakdown = "  ".join(f"{k}={v}" for k, v in sorted(stats.items()))
-        print(f"batch results: {breakdown}")
-        if stats.get("parse_failed"):
-            print(f"warning: {stats['parse_failed']} 件が Verdict スキーマとして"
-                  f"解釈できず破棄されました。structured outputs なしで投入された"
-                  f"旧バッチの可能性があります。--mode judge で再収集→再投入して"
-                  f"ください", file=sys.stderr)
-        if stats.get("errored"):
-            print(f"warning: {stats['errored']} 件がAPI側でエラー終了しています",
-                  file=sys.stderr)
-
-    if args.fetch:
-        from pathlib import Path
-
-        import anthropic
-        client = anthropic.Anthropic()
-        results = client.messages.batches.results(args.fetch)
-        # 生結果を必ず先にディスクへ退避する (取込で破棄されても再解析できる
-        # ように。Batch結果はサーバ側で約29日しか保持されないため、課金済み
-        # データの回収可能性を手元に確保しておく)。
-        raw_lines = [item.model_dump_json() for item in results]
-        raw_path = args.save_raw or f"{args.fetch}.results.jsonl"
-        Path(raw_path).write_text(
-            "\n".join(raw_lines) + ("\n" if raw_lines else ""), encoding="utf-8")
-        print(f"saved {len(raw_lines)} raw results -> {raw_path}")
-        stats: Counter = Counter()
-        count = ingest_batch_results(raw_lines, cache, stats=stats)
-        _report_ingest(count, stats, f"batch {args.fetch}")
-        return 0
-
-    if args.ingest:
-        stats = Counter()
-        count = ingest_batch_results_file(args.ingest, cache, stats=stats)
-        _report_ingest(count, stats, args.ingest)
-        return 0
-
-    if not args.data:
-        print("error: --mode judge requires --data", file=sys.stderr)
-        return 2
-
-    candles = load_history(args.data, tf=Timeframe(args.tf))
-    stage = args.tier or "ALL"
-    pending = BacktestEngine.collect_judgements(
-        _with_progress(candles), build_provider(args),
-        policy=DEFAULT_POLICY, cache=cache, tier=stage)
-    total_pending = len(pending)
-    if args.limit is not None and args.limit < total_pending:
-        pending = pending[:args.limit]
-        print(f"[pilot] {total_pending} 件中 先頭 {len(pending)} 件のみ投入します "
-              f"(少額検証)")
-    count = write_batch_file(pending, args.batch_file,
-                             system_prompt=_load_system_prompt(args))
-    print(f"collected {count} unresolved judgements (tier={stage}) "
-          f"-> {args.batch_file}")
-
-    if not count:
-        if stage == "L1":
-            print("L1 は全件解決済み。次: --tier L2 で第2弾を収集してください")
-        else:
-            print("verdict_cache は全件解決済み。--mode replay へ進めます")
-        return 0
-
-    if args.submit:
-        import json as _json
-
-        import anthropic
-        from pathlib import Path
-        requests = [_json.loads(line) for line
-                    in Path(args.batch_file).read_text(encoding="utf-8").splitlines()
-                    if line.strip()]
-        client = anthropic.Anthropic()
-        batch = client.messages.batches.create(requests=requests)
-        print(f"submitted batch: {batch.id} (status={batch.processing_status})")
-        print(f"完了後: python -m infers.main --mode judge --fetch {batch.id} "
-              f"--verdict-cache {args.verdict_cache}")
-        if stage == "L1":
-            print("取込後、第2弾: --mode judge --tier L2 --submit で "
-                  "L1=GO のプランのみ L2 (Fable 5) を投入してください")
-    else:
-        print("次: --submit で Batches API へ投入するか、結果JSONLを "
-              "--ingest で取込んでください")
-    return 0
-
-
 def run_replay(args: argparse.Namespace) -> int:
     """Pass2: verdict_cache 参照のみの最終リプレイ (run_backtest と同一実装)。"""
     return run_backtest(args)
@@ -681,7 +514,7 @@ def run_live(args: argparse.Namespace) -> int:
         runner = LiveRunner(
             feed=feed, spec=spec, tf=Timeframe(args.tf), broker=broker,
             provider=build_provider(args),
-            gateway=_build_gateway(args, cache_only=False),
+            gateway=_build_gateway(args),
             risk=RiskManager(DEFAULT_RISK), fsm_config=DEFAULT_FSM,
             journal=journal,
             warm_bars=args.warm_bars,
@@ -726,8 +559,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.mode == "backtest":
         return run_backtest(args)
-    if args.mode == "judge":
-        return run_judge(args)
     if args.mode == "replay":
         return run_replay(args)
     if args.mode == "export":

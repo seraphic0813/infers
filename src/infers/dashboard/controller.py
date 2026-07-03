@@ -151,7 +151,7 @@ def _default_runner_factory(*, args, login, password, server, journal):
     runner = LiveRunner(
         feed=feed, spec=spec, tf=tf, broker=broker,
         provider=provider,
-        gateway=_build_gateway(args, cache_only=False),
+        gateway=_build_gateway(args),
         risk=RiskManager(DEFAULT_RISK), fsm_config=DEFAULT_FSM,
         journal=journal,
     )

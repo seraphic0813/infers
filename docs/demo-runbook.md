@@ -25,8 +25,9 @@ python -m infers.main --mode live --demo --symbol XAUUSD `
 
 - `--demo` は既定。判断は追記専用ジャーナル
   `work/journal/XAUUSD_<UTC日付>.jsonl` に自動で永続化される(`--journal PATH` で変更可)。
-- ゲートは既定で `--ai-client rule`($0・決定論)。LLM ゲートを使う場合のみ
-  `--ai-client claude` と `ANTHROPIC_API_KEY` 環境変数が必要。
+- ゲートは既定で `--ai-client rule`($0・決定論)。トレード判定にLLMは現在
+  不使用(正式方針。CLAUDE.md A-12)。Narrow Focus 固有特徴量を前提としない
+  別手法では `--ai-client none`(常時GOのパススルー)を使う。
 - 口座資格情報・API キーは **環境変数のみ**(コード・設定・ログに書かない)。
 
 > **ウォームアップの注意**: ライブはコールド起動で、上位足インジケーター

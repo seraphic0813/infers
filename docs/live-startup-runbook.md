@@ -1,8 +1,15 @@
 # ライブ監視 起動手順(PC再起動後など)
 
-narrow_focus・smc_bos・atr_trend_scalp の3手法を、別々のMT5デモ口座(別ターミナル
+narrow_focus・atr_trend_scalp の2手法を、別々のMT5デモ口座(別ターミナル
 インストール)で同時にライブ監視するための手順。PCを再起動するとプロセスは
 残らないため、毎回この手順で再起動する。
+
+> **smc_bos はライブ凍結中(2026-07-03)**。`reports/smc_bos_full/` の年次分解で
+> 事前宣言基準(全暦年PF≥0.9)を満たさないことが確定した(2022年PF0.801の赤字・
+> 2026年が純益の約60%)ため、2口座目でのライブ稼働を停止している。
+> `scripts\start_live.ps1`/`.bat` は smc_bos を起動しないよう既に変更済み。
+> 詳細・再開条件は [strategies/smc_bos/spec.md](../src/infers/strategies/smc_bos/spec.md)
+> 「ライブ凍結ステータス」節を参照。以下の手順3(smc_bos起動)は**凍結解除まで実施しない**。
 
 **`scripts\start_live.bat`(ダブルクリック)/ `scripts\start_live.ps1` が
 この手順を自動化している。** 通常はそちらを使えばよく、以下は内部で
@@ -13,7 +20,7 @@ narrow_focus・smc_bos・atr_trend_scalp の3手法を、別々のMT5デモ口�
 ## 前提
 
 - narrow_focus → `Vantage Prime MT5 Terminal`(既定口座)
-- smc_bos → `Vantage Trading MT5 Terminal2`(2口座目)
+- smc_bos → `Vantage Trading MT5 Terminal2`(2口座目)。**ライブ凍結中(起動しない)**
 - atr_trend_scalp → `Vantage Trading MT5 Terminal3`(3口座目)
 - 3つのMT5ターミナルは別フォルダにインストール済み。`--terminal-path` を
   **必ず全てに明示指定**すること。省略すると `mt5.initialize()` が
@@ -48,9 +55,9 @@ narrow_focus・smc_bos・atr_trend_scalp の3手法を、別々のMT5デモ口�
    `work/narrow_focus_live.log` に `[warm-up] fed N historical bars to provider`
    が出るまで待つ(MT5ターミナル起動+ヒストリカル取得+ウォームアップ完了の合図)。
 
-3. narrow_focus の起動完了を確認してから smc_bos を起動する(同時起動すると
-   どちらのターミナルが先に立つか競合し、相乗り事故の再発リスクがあるため
-   **同時に投げない**):
+3. ~~smc_bos を起動する~~ → **ライブ凍結中のためスキップ**(2026-07-03。上記の注記・
+   spec.md 参照)。凍結解除が決定した場合のみ、以下のコマンドで起動する
+   (`start_live.ps1` の対応ブロックも合わせて復元すること):
 
    ```bash
    python -m infers.main --mode live --demo --strategy smc_bos --symbol XAUUSD \
@@ -62,8 +69,8 @@ narrow_focus・smc_bos・atr_trend_scalp の3手法を、別々のMT5デモ口�
 
    同様に `work/smc_bos_live.log` に warm-up 完了ログが出るまで待つ。
 
-4. smc_bos の起動完了を確認してから atr_trend_scalp を起動する(同時起動
-   しない理由は手順3と同じ):
+4. narrow_focus の起動完了を確認してから atr_trend_scalp を起動する(同時起動
+   しない理由は手順2と同じ。smc_bos は凍結中のためこの間には挟まない):
 
    ```bash
    python -m infers.main --mode live --demo --strategy atr_trend_scalp --symbol XAUUSD \
@@ -77,22 +84,23 @@ narrow_focus・smc_bos・atr_trend_scalp の3手法を、別々のMT5デモ口�
 
    同様に `work/atr_trend_scalp_live.log` に warm-up 完了ログが出るまで待つ。
 
-5. 3ターミナルすべてが別プロセス・別パスで起動していることを確認(これが
-   一番重要な検証ポイント):
+5. 2ターミナル(narrow_focus・atr_trend_scalp)がそれぞれ別プロセス・別パスで
+   起動していることを確認(これが一番重要な検証ポイント。smc_bos は凍結中
+   のため起動していないことも確認する):
 
    ```bash
    powershell -Command "Get-CimInstance Win32_Process | Where-Object { \$_.Name -like '*terminal64*' } | Select-Object ProcessId,ExecutablePath"
    ```
 
    `Vantage Prime MT5 Terminal\terminal64.exe`・
-   `Vantage Trading MT5 Terminal2\terminal64.exe`・
-   `Vantage Trading MT5 Terminal3\terminal64.exe` の3行が、別PIDで
-   表示されればOK。行数が足りない・パスが重複している場合は相乗り事故が
-   起きているので、手順1からやり直す。
+   `Vantage Trading MT5 Terminal3\terminal64.exe` の2行が、別PIDで
+   表示されればOK(`Vantage Trading MT5 Terminal2\terminal64.exe` = smc_bos用は
+   凍結中のため表示されないのが正しい)。行数が想定と異なる・パスが重複している
+   場合は相乗り事故が起きているので、手順1からやり直す。
 
 ## 補足
 
-- `--ai-client none`(passthroughゲート)は smc_bos・atr_trend_scalp 用
+- `--ai-client none`(passthroughゲート)は smc_bos(凍結中)・atr_trend_scalp 用
   (いずれもルールベースゲートが narrow_focus 固有の特徴量を前提とするため
   GUARDRAIL NO_GO になる。spec.md 参照)。narrow_focus はルールベース
   ゲート前提のため付けない。
