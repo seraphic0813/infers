@@ -64,7 +64,7 @@
 
 ### T1: atr_trend_scalp マージ — ✅完了(2026-07-02、PR #14・ローカル同期済み)
 
-### T2: `/bit-check` Skill 【最優先・他タスクの前提】
+### T2: `/bit-check` Skill 【最優先・他タスクの前提】— ✅完了(2026-07-03)
 - **目的**: 完了ゲート(D1)のワンコマンド化。
 - **指示**:
   1. `.claude/skills/bit-check/SKILL.md` を作成。手順: ① `pytest` 全件 → ② depth50 再現コマンド
@@ -73,32 +73,48 @@
   2. 黄金値は Skill 内にハードコード。更新は意図的な基準変更時のみ・理由の記録必須、と Skill 本文に明記。
   3. 実行時間約25分を冒頭に注記(短縮版は作らない。コミット前はフル必須)。
 - **完了条件**: 現状 main で PASS。**依存**: なし。**工数**: 0.5日。
+- **実績**: `tools/bit_check.py` + `.claude/skills/bit-check/SKILL.md`。黄金値は実測で確認
+  (trades=624 / PF=1.487396352 / win_rate=0.533653846 / max_dd=32577 tick*steps($325.77) /
+  gate={CACHE:GO=3124, CACHE:NO_GO=1034})。以後 T6 の完了ゲートで実際に PASS 判定に使用。
 
-### T3: 年次分解ツール + `/annual-breakdown` Skill
+### T3: 年次分解ツール + `/annual-breakdown` Skill — ✅完了(2026-07-03)
 - **指示**:
   1. `tools/annual_breakdown.py`: `report_data.js` から暦年別(`exit_time` UTC 基準)のトレード数/PF/勝率/純益/DD を出力。
   2. 機械警告2つ: (a) 単年純益寄与>50%、(b) いずれかの暦年 PF<0.9。警告時は「過剰適合/一過性依存の疑い」と明記。
   3. Skill `/annual-breakdown <report_dir>` としてラップ。
 - **完了条件**: rule_depth50 / smc_bos_full / atr_trend_scalp_full の3つで実行し、smc_bos で警告(a)(b)が両方発火(既知の正解)。トレード判定コード不変。
 - **依存**: なし。**工数**: 0.5〜1日。
+- **実績**: smc_bos で(a)(b)両方発火(2022年PF0.801・2026年純益寄与60.1%)・atr_trend_scalpで警告なし
+  (既知の正解と一致)。depth50でも(b)が2021年(PF0.599)で新規発火 — 追加所見として記録
+  (depth50はビット一致制約下ではコード変更不可のため対応不要。新変種[T16]の判断材料)。
 
-### T4: CLAUDE.md 改訂
+### T4: CLAUDE.md 改訂 — ✅完了(2026-07-03)
 - **指示**: ① A-12〜15 を「トレード判定に LLM 不使用」の現行方針へ書き換え(旧規約は再導入時の凍結規約として付録へ)。② 黄金値5点(D1)を本文に明記し `/bit-check` を参照。③ 定石6追加「採否は全期間1本で判断せず年次分解+事前宣言基準で判断」。④ 手法テーブル追加(depth50=コア防御/atr=コア攻撃・デモ検証中/smc_bos=**ライブ凍結**/market_tpsl=実証用・運用非対象)。⑤ 「手法はマージされて初めて登録済み」注記。⑥ コマンド表に atr 追加(judge/replay 行の撤去は T6 後)。
 - **依存**: T2/T3。**工数**: 0.5日。
 
-### T5: smc_bos ライブ凍結の実施と文書化
+### T5: smc_bos ライブ凍結の実施と文書化 — ✅完了(2026-07-03)
 - **指示**: ① 2口座目の smc_bos ライブプロセスを stop_live 手順で停止、MT5 建玉なしを確認。② `smc_bos/spec.md` 冒頭に凍結ステータス+判定根拠(本書 §0 の年次テーブル)を追記。③ `reports/README.md` smc_bos 節に年次分解と判定を追記。④ live-startup-runbook の smc_bos 手順を「凍結中」注記つきへ。再開条件は D3 のとおり明記。
 - **依存**: なし。**工数**: 0.5日。
+- **実績**: spec.md・reports/README.md・live-startup-runbook.md・scripts/start_live.ps1/.bat
+  (gitignore対象・ローカルのみ)を更新。実プロセス停止は運用者側の作業として案内(このセッションでは
+  MT5プロセスへの直接操作は行っていない)。
 
 ---
 
 ## Phase 2: 核心改善(Week 2〜4)
 
-### T6: AI層ステップ1撤去(LLM実呼び出し系のみ)
+### T6: AI層ステップ1撤去(LLM実呼び出し系のみ)— ✅完了(2026-07-03)
 - **削除**: `ai/batch.py` / `gateway.py` の `AnthropicLlmClient` / `main.py` の `--mode judge`(--batch/--submit/--fetch/--ingest)と `CacheOnlyClient`・2パス分岐 / 対応テスト(LLM・Batch 依存部分のみ。キャッシュ・ゲートウェイ・ガードレールのテストは残す)。
 - **不可侵(D2)**: `AiGateway` 本体・`VerdictCache`・`EscalationPolicy`・`Verdict`/`JudgementRequest`・`rule_judge.py`・`passthrough.py`・`core/loop.py` のゲート呼び出し。1バイトも変えない。
 - `--mode replay` は backtest の別名で温存。`anthropic` の必須依存解除を確認。phase1 §7 は「凍結仕様」注記を付け残置。
 - **完了条件**: 完了ゲート(強い一致)+削除機能への参照が grep で空。**依存**: T2。**工数**: 2〜3日。
+- **実績**: `ai/batch.py`削除・`AnthropicLlmClient`/`CacheOnlyClient`/`DEFAULT_POLICY`/
+  `_load_system_prompt`削除・`--mode judge`と関連引数(`--batch`/`--tier`/`--submit`/`--fetch`/
+  `--save-raw`/`--ingest`/`--limit`/`--system-prompt-file`)削除・`--ai-client`選択肢から`claude`削除。
+  `dashboard/controller.py`の`_build_gateway`呼び出し(シグネチャ変更分)も追随修正。
+  pytest 408件全合格 + depth50強いビット一致(PF1.487396352/624件/DD$325.77/勝率53.37%/
+  CACHE:GO=3124・NO_GO=1034、`/bit-check`で実測PASS確認)。`anthropic`はpyproject.tomlに
+  元々正式依存として未記載だったため依存関係ファイルの変更は不要だった。
 
 ### T7: atr_trend_scalp スリッページ・ストレステスト【実口座昇格の関門1】
 - **指示**: ① SimBroker/engine に opt-in `--slippage-ticks N`(既定0=現行と完全同一経路)。SL/トレール/成行決済を不利方向へ N ティック。② atr 全期間で N=0/1/2/3 の感度テーブルを health_check へ追記。③ **事前宣言基準**: N=2 で PF<1.2 → v1.1 の trail=0.15 は幻とみなし trail 再探索(T9)を起票。PF≥1.2 → T8 へ。
