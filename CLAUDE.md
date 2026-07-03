@@ -84,6 +84,7 @@ docstring)。手法は `--strategy <名前>`(レジストリ登録名)で選択�
 | `python -m infers.main --mode export --data <out.parquet> --years 5` | MT5からヒストリカルデータをParquetへ書き出し |
 | `python -m infers.dashboard [--port 8765] [--symbol XAUUSD]` | ローカル監視ダッシュボード(127.0.0.1のみ・標準ライブラリのみ・トレード根幹から分離)。ブラウザから口座情報入力・監視開始/安全停止・ジャーナル監視。内部はlive稼働と同一経路を呼ぶだけ。資格情報はメモリ保持のみ。実装は `src/infers/dashboard/` |
 | `python -m infers.main --mode backtest ... --slippage-ticks N` | 約定現実性ストレステスト: 成行参入・成行決済・保護SL/トレール決済を不利方向へNティックずらす(指値は対象外)。既定0=従来挙動と1ティックも不変。トレール極小幅の手法の約定依存度測定用(改善プラン T7) |
+| `python tools/atr_demo_deviation.py <journal>` | ライブジャーナルのSL/トレール決済 実約定 vs 期待値の乖離集計(中央値/p90)。atr_trend_scalpの実口座昇格判定用(改善プラン T8) |
 | `/bit-check` Skill | 完了ゲート(pytest全合格+depth50強いビット一致)のワンコマンド検証 |
 | `/annual-breakdown <report_dir>` Skill(`tools/annual_breakdown.py`) | レポートの年次分解+過剰適合警告(定石6) |
 
