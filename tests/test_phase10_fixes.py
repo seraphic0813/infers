@@ -4,8 +4,12 @@
   1. TradingLoop の日次境界で new_day() が決定論的に呼ばれる
   2. 戦略プロバイダの FIBリトレースメント水準 (FIBファミリー配線)
   3. AiGateway の判定集計 (ガードレールNO_GOの可視化)
-  4. backtest/replay 用 CacheOnlyClient のフェイルセーフ
+  4. 2段階バッチ収集(collect_judgements) + Batch結果取込の可視化・救済パース
   5. python -m infers.backtest のサブコマンドマッピング
+
+(旧 CacheOnlyClient のフェイルセーフテストは、`--ai-client claude` 撤去に伴い
+ 改善プラン T6 で削除。rule_judge/passthrough は例外を投げない純粋関数のため
+ 対応する概念が無い)
 """
 
 from __future__ import annotations
@@ -23,7 +27,6 @@ from infers.core.loop import ProviderOutput, TradingLoop
 from infers.core.models import Candle, Timeframe
 from infers.execution.sim_broker import SimBroker
 from infers.execution.sm import FsmConfig
-from infers.main import CacheOnlyClient
 from infers.analysis.dow import TrendState
 from infers.strategies.narrow_focus.provider import (
     FIB_RETRACE_RATIOS, MacroResampler, fib_retrace_levels, macro_gate,
@@ -263,27 +266,6 @@ class TestGatewayStats:
 
 
 # ---------------------------------------------------------------------------
-# 4. CacheOnlyClient (replay のフェイルセーフ)
-# ---------------------------------------------------------------------------
-
-class TestCacheOnlyClient:
-    def test_cache_miss_becomes_guardrail_no_go(self):
-        gw = AiGateway(client=CacheOnlyClient(), cache=VerdictCache(), policy=POLICY)
-        v = gw.judge(_request(), cluster_score=Decimal(2), ambiguity=Decimal("0.5"))
-        assert (v.decision, v.source) == ("NO_GO", "GUARDRAIL")
-        assert gw.guardrail_reasons["L1_FAILURE: CacheMissError"] == 1
-
-    def test_cached_verdict_is_served_without_llm(self):
-        cache = VerdictCache()
-        req = _request()
-        cache.put(cache_key(req, "L1"),
-                  Verdict(decision="GO", confidence=Decimal(1), source="L1"))
-        gw = AiGateway(client=CacheOnlyClient(), cache=cache, policy=POLICY)
-        v = gw.judge(req, cluster_score=Decimal(2), ambiguity=Decimal("0.5"))
-        assert (v.decision, v.source) == ("GO", "CACHE")
-
-
-# ---------------------------------------------------------------------------
 # 4a. 2段階バッチ収集 (L2=Fable 5 のコスト制御)
 # ---------------------------------------------------------------------------
 
@@ -372,64 +354,6 @@ class TestTwoStageCollect:
 
 
 # ---------------------------------------------------------------------------
-# 4b. Batch結果取込の可視化と救済パース
-# ---------------------------------------------------------------------------
-
-class TestBatchIngestStats:
-    def _line(self, key: str, text: str) -> str:
-        import json
-        return json.dumps({
-            "custom_id": key,
-            "result": {"type": "succeeded",
-                       "message": {"content": [{"type": "text", "text": text}]}},
-        })
-
-    def test_stats_breakdown_explains_zero_ingest(self):
-        import json
-        from collections import Counter
-
-        from infers.ai.batch import ingest_batch_results
-        lines = [
-            self._line("k1", "I think the answer is GO, confidence high."),
-            json.dumps({"custom_id": "k2", "result": {"type": "errored"}}),
-            "broken{",
-        ]
-        stats: Counter = Counter()
-        cache = VerdictCache()
-        assert ingest_batch_results(lines, cache, stats=stats) == 0
-        assert stats["parse_failed"] == 1      # 自由文 (旧バッチの症状)
-        assert stats["errored"] == 1
-        assert stats["malformed_line"] == 1
-        assert stats["ingested"] == 0
-
-    def test_lenient_parse_salvages_json_embedded_in_prose(self):
-        from infers.ai.batch import ingest_batch_results
-        verdict_json = Verdict(decision="GO", confidence=Decimal("0.8"),
-                               source="LLM").model_dump_json()
-        text = f"Here is my judgement:\n```json\n{verdict_json}\n```\nThanks."
-        cache = VerdictCache()
-        assert ingest_batch_results([self._line("k1", text)], cache) == 1
-        assert cache.get("k1").decision == "GO"
-
-    def test_excess_reasons_are_clamped_not_dropped(self):
-        # structured outputs は maxItems を強制しない — reasons が4件以上でも
-        # 先頭3件へ切り詰めて取り込む (decision/confidence は不変)
-        import json
-        from infers.ai.batch import ingest_batch_results
-        text = json.dumps({
-            "decision": "WAIT", "confidence": "0.58",
-            "reasons": ["r1", "r2", "r3", "r4"],
-            "selected_wave_count": None, "source": "LLM",
-        })
-        cache = VerdictCache()
-        assert ingest_batch_results([self._line("k1", text)], cache) == 1
-        verdict = cache.get("k1")
-        assert verdict.decision == "WAIT"
-        assert verdict.reasons == ("r1", "r2", "r3") or \
-            list(verdict.reasons) == ["r1", "r2", "r3"]
-
-
-# ---------------------------------------------------------------------------
 # 5. python -m infers.backtest のサブコマンドマッピング
 # ---------------------------------------------------------------------------
 
@@ -438,7 +362,6 @@ class TestBacktestCliWrapper:
         from infers.backtest.__main__ import _argv
         assert _argv(["run", "--data", "d.parquet"]) == \
             ["--mode", "backtest", "--data", "d.parquet"]
-        assert _argv(["judge", "--batch"]) == ["--mode", "judge", "--batch"]
         assert _argv(["replay"]) == ["--mode", "replay"]
 
     def test_unknown_subcommand_exits(self):

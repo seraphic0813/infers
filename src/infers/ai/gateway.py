@@ -1,8 +1,9 @@
-"""AI Gateway — 3層ハイブリッド判断 (設計書 §7 / CLAUDE.md 第13〜16条)。
+"""AI Gateway — 判断ゲート (設計書 §7 / CLAUDE.md A-12〜15)。
 
-  L0: Python決定論層 (本モジュールの呼び出し側。無料・常時)
-  L1: claude-haiku-4-5  — 一次トリアージ
-  L2: claude-fable-5    — 最終ジャッジ (高曖昧性・勝負所のみ)
+トレード判定にLLMは現在不使用(正式方針。CLAUDE.md A-12)。本ゲートウェイは
+決定論クライアント(rule_judge.RuleBasedLlmClient / passthrough.PassthroughLlmClient)
+を経由するのみ。L1/L2/モデルID・Batches API等の旧LLM階層設計はCLAUDE.md
+付録「LLM再導入時の凍結規約」として保存済み(再導入時のみ参照)。
 
 安全原則 (CLAUDE.md 第1条):
   - 本ゲートウェイは「新規エントリーのゲート」専用。防御 (SL/利確) は
@@ -28,7 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 PROMPT_VERSION = "nf-v3"
 
-# 層→モデルIDの対応 (CLAUDE.md 第14条)
+# 層→モデルIDの対応。現在ai_client="rule"/"none"は参照しないが、cache_key()の
+# 決定論キー生成に使うため保持(CLAUDE.md 付録「LLM再導入時の凍結規約」)
 MODELS: dict[str, str] = {
     "L1": "claude-haiku-4-5",
     "L2": "claude-fable-5",
@@ -48,8 +50,9 @@ class JudgementKind(str, Enum):
 
 
 class JudgementRequest(BaseModel):
-    """LLMへ渡す判断要求。features は事前計算済みの数値特徴量のみ
-    (生ローソク足を渡さない: CLAUDE.md 第13条)。"""
+    """判断要求。features は事前計算済みの数値特徴量のみ(生ローソク足を渡さない:
+    CLAUDE.md 付録「LLM再導入時の凍結規約」)。現在は決定論ゲート(rule_judge/
+    passthrough)がこの型を消費する(LLMは呼ばない。CLAUDE.md A-12)。"""
 
     model_config = ConfigDict(frozen=True)
 
@@ -80,7 +83,7 @@ NO_GO_POLICY = Verdict(decision="NO_GO", confidence=Decimal(1),
 def cache_key(request: JudgementRequest, tier: str) -> str:
     """決定論的キャッシュキー: (model, prompt_version, feature_hash)。
 
-    json.dumps は sort_keys=True 固定 (CLAUDE.md 第15条: 決定論化)。
+    json.dumps は sort_keys=True 固定 (決定論化。CLAUDE.md 付録「LLM再導入時の凍結規約」)。
     """
     payload = {
         "model": MODELS[tier],
@@ -164,55 +167,6 @@ class LlmClient(Protocol):
     (ガードレールは Gateway 側が一元的に担う)。"""
 
     def judge(self, request: JudgementRequest, tier: str) -> Verdict: ...
-
-
-class AnthropicLlmClient:
-    """anthropic SDK 実装 (ライブ用。CIでは FakeClient を使用)。
-
-    - システムプロンプト (手法マニュアル+判定ルール) は凍結し
-      cache_control でプロンプトキャッシュ (CLAUDE.md 第15条)
-    - L2 (claude-fable-5): adaptive thinking + effort high。
-      sampling パラメータと明示 thinking disabled は 400 のため渡さない (第14条)
-    - structured outputs (messages.parse) で Verdict スキーマを強制
-    """
-
-    def __init__(self, system_prompt: str, *, timeout_s: float = 30.0) -> None:
-        self._system = system_prompt
-        self._timeout = timeout_s
-        self._client = None  # 遅延初期化
-
-    def _ensure_client(self):
-        if self._client is None:
-            import anthropic  # 遅延 import (バックテスト/CI環境で不要)
-            self._client = anthropic.Anthropic(timeout=self._timeout)
-        return self._client
-
-    def judge(self, request: JudgementRequest, tier: str) -> Verdict:
-        client = self._ensure_client()
-        kwargs: dict = {}
-        if tier == "L2":
-            kwargs["thinking"] = {"type": "adaptive"}
-            kwargs["output_config"] = {"effort": "high"}
-        response = client.messages.parse(
-            model=MODELS[tier],
-            max_tokens=2048,
-            system=[{
-                "type": "text",
-                "text": self._system,
-                "cache_control": {"type": "ephemeral"},
-            }],
-            messages=[{
-                "role": "user",
-                "content": json.dumps(
-                    {"kind": request.kind.value, "symbol": request.symbol,
-                     "direction": request.direction, "features": request.features},
-                    sort_keys=True, default=str, ensure_ascii=False),
-            }],
-            output_format=Verdict,
-            **kwargs,
-        )
-        verdict: Verdict = response.parsed_output
-        return verdict.model_copy(update={"source": tier})
 
 
 # ---------------------------------------------------------------------------

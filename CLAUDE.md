@@ -33,7 +33,7 @@
 
 - OS: Windows 11(シェルは PowerShell 5.1。`&&` 不可、`;` か `if ($?)` で連結)
 - Python 3.12+(venv: `python -m venv .venv` → `.venv\Scripts\Activate.ps1`)
-- 主要依存: `MetaTrader5`(Windows専用・ライブ/ヒストリカル/発注)、`numpy`/`polars`、`pydantic` v2、`anthropic`(Messages + Batches)、`duckdb`+Parquet、`structlog`、`pytest`+`hypothesis`
+- 主要依存: `MetaTrader5`(Windows専用・ライブ/ヒストリカル/発注)、`numpy`/`polars`、`pydantic` v2、`duckdb`+Parquet、`structlog`、`pytest`+`hypothesis`(`anthropic` は改善プランT6でLLM実呼び出し系を撤去したため不要。トレード判定にLLMは現在不使用)
 - パッケージレイアウト: `src/infers/`(phase2 設計書の6層構成に従う。新モジュールを勝手な場所に作らない。手法固有コードは `strategies/<手法名>/`、複数手法で再利用する汎用インジケーターのみ `indicators/`)
 - APIキー・口座資格情報は環境変数のみ。コード・設定ファイル・ログ・ジャーナルに書かない
 
