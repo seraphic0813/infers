@@ -83,11 +83,12 @@ docstring)。手法は `--strategy <名前>`(レジストリ登録名)で選択�
 | `python -m infers.journal replay --file <path> [--from <ts>]` | ジャーナルの要約 + ゴールデン回帰検証(ルールゲートのセッションは記録済み特徴量を `judge_features` へ再投入し同一判断を確認)。実装は `src/infers/journal.py` |
 | `python -m infers.main --mode export --data <out.parquet> --years 5` | MT5からヒストリカルデータをParquetへ書き出し |
 | `python -m infers.dashboard [--port 8765] [--symbol XAUUSD]` | ローカル監視ダッシュボード(127.0.0.1のみ・標準ライブラリのみ・トレード根幹から分離)。ブラウザから口座情報入力・監視開始/安全停止・ジャーナル監視。内部はlive稼働と同一経路を呼ぶだけ。資格情報はメモリ保持のみ。実装は `src/infers/dashboard/` |
+| `python -m infers.main --mode backtest ... --slippage-ticks N` | 約定現実性ストレステスト: 成行参入・成行決済・保護SL/トレール決済を不利方向へNティックずらす(指値は対象外)。既定0=従来挙動と1ティックも不変。トレール極小幅の手法の約定依存度測定用(改善プラン T7) |
 | `/bit-check` Skill | 完了ゲート(pytest全合格+depth50強いビット一致)のワンコマンド検証 |
 | `/annual-breakdown <report_dir>` Skill(`tools/annual_breakdown.py`) | レポートの年次分解+過剰適合警告(定石6) |
 
 - テストはCIで `pytest` 全件を必須とする。状態機械・注文ロジックの変更はプロパティテスト追加なしにマージしない。
-- ゴールデンリプレイ(同一入力→同一判断の回帰検証)は `tests/test_journal.py` でカバー。ルールゲート($0・決定論)のセッションについて、ジャーナルの特徴量スナップショットから判定が再現されることを検証する。LLMゲート(`--ai-client claude`)は非決定論のため対象外。
+- ゴールデンリプレイ(同一入力→同一判断の回帰検証)は `tests/test_journal.py` でカバー。ルールゲート($0・決定論)のセッションについて、ジャーナルの特徴量スナップショットから判定が再現されることを検証する。
 
 ## コード記述の厳格なルール
 

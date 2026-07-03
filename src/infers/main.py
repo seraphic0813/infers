@@ -287,6 +287,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="建値SL = エントリー + この値(ticks)。"
                         "省略時は既定値(2 ticks=$0.02)。"
                         "大きくするとSL_AT_BE後のSL位置が遠くなりSL_AT_BE→ADD経路の余裕が増える")
+    p.add_argument("--slippage-ticks", type=int, default=0,
+                   help="backtest: 約定現実性ストレステスト用の逆方向スリッページ (ticks)。"
+                        "成行参入・成行決済・保護SL/トレール決済の約定価格を不利方向へ"
+                        "この本数ずらす (指値約定は指値契約のため対象外)。"
+                        "既定0で従来挙動と1ティックも変わらない。トレール極小幅の手法"
+                        "(atr_trend_scalp 等)の約定依存度を測る (改善プラン T7)")
     # 安全ガード (設計書 §11: デモ→最小ロットの段階を必ず踏む)
     p.add_argument("--demo", action="store_true", default=True,
                    help="デモ口座モード (既定)")
@@ -423,7 +429,8 @@ def run_backtest(args: argparse.Namespace) -> int:
               f"tick_value={tick_value} USD/tick/step  "
               f"initial_equity={args.initial_capital} USD")
     engine = BacktestEngine(
-        broker=LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5),
+        broker=LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5,
+                            slippage_ticks=args.slippage_ticks),
         gateway=gateway,
         risk=RiskManager(DEFAULT_RISK),
         fsm_config=fsm_config,
