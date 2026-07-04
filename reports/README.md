@@ -481,3 +481,40 @@ smc_bos単独の要因(2026-01-31、他2手法はその日無取引)であり、
 可能性(「平常時は無相関、ストレス時のみ相関1に近づく」金融市場の典型的パターン)は
 バックテストでは検出できない。口座横断モニタ(T12)による実運用時の合算エクスポージャー
 監視と併用すること。
+
+## narrow_focus_mtf(M1実測)(2026-07-04、改善プラン T16)
+
+Narrow Focus 手法のマルチTF変種(判定TFをM5→H1へ引き上げ)。詳細設計・採否基準・
+完全な実測記録は
+[strategies/narrow_focus/mtf-variant.md](../src/infers/strategies/narrow_focus/mtf-variant.md)
+§4 を参照。depth50 の確定フィルター構成(macro_wave2/depth_screen/depth_max=0.50/
+score_fib=False)をそのまま引き継ぎ、TF系のみ変更した単一変数実験。
+
+| 指標 | depth50(M5) | narrow_focus_mtf(H1・M1) |
+|---|---|---|
+| トレード数 | 624 | 80 |
+| PF | 1.487396352 | **0.670338236** |
+| 勝率 | 53.37% | 21.25% |
+| 最大DD | $325.77 | $573.60 |
+| 純益(5年) | +$1,444(概算) | **−$418.71** |
+| 売り比率 | 約84% | 86.25% |
+| トレードスパン中央値 | ≈1時間 | 10〜12時間 |
+
+年次分解では2021・2022・2025・2026年でPF<0.9のフロア割れ警告が発火(黒字は2023・2024年のみ)。
+
+**判定: 不採用(参考記録)(2026-07-04、Fable 5)。** 事前宣言基準(全暦年PF>1.2 かつ
+買い側黒字)に対し、4/6年がフロア割れ・買い側PF0.421(−$167.20)で両基準とも明確に未達。
+レジストリ登録は残置、ライブ投入はしない。主要知見: ①売り偏重(86.25%)はTF構造の変更では
+解消しない=原因はゲート構造そのもの ②BE到達率11.25%(depth50=47.6%)— M5較正のFSM設定
+(min_be_distance=$0.10)がH1スイング幅に対し機能不全を起こし利確パイプラインが停止
+(M1劣化の最大の構造要因と推定)。M2(FSMのH1スケーリング等)は保留(ユーザー判断)。
+詳細は [mtf-variant.md](../src/infers/strategies/narrow_focus/mtf-variant.md) §4.7。
+
+再生成コマンド:
+```
+python tools/resample_parquet.py data/xauusd_m5.parquet data/xauusd_h1.parquet --tf H1
+python -m infers.main --mode backtest --data data/xauusd_h1.parquet --tf H1 --symbol XAUUSD \
+  --strategy narrow_focus_mtf --verdict-cache work/cache/verdicts_nfmtf.sqlite3 \
+  --report reports/narrow_focus_mtf_full
+python tools/annual_breakdown.py reports/narrow_focus_mtf_full
+```

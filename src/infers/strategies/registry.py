@@ -96,6 +96,32 @@ register(StrategySpec(
 ))
 
 
+def _build_narrow_focus_mtf(*, symbol: str, tf: Timeframe) -> SignalProvider:
+    """マルチTF変種 M1 (narrow_focus/mtf-variant.md §2.2)。
+
+    depth50 の確定フィルター構成 (macro_wave2/depth_screen/depth_max=0.50/
+    score_fib=False) をそのまま引き継ぎ、rsi_macro_tfs のみ (H4, D1) へ変更する
+    (判定TFをH1へ引き上げるため。呼び出し元が --tf H1 を明示する規約は
+    smc_bos の M30 と同じ)。macro_tf(D1)・wave2_tf(H4)・執行モデル(既定
+    NarrowFocusExecution)・FSM設定は全て既定のまま据え置く(単一変数実験)。
+    """
+    from infers.strategies.narrow_focus.provider import InfersSignalProvider, ProviderConfig
+    cfg = ProviderConfig(macro_wave2=True, depth_screen=True,
+                         depth_max=Decimal("0.50"), score_fib=False,
+                         rsi_macro_tfs=(Timeframe.H4, Timeframe.D1))
+    return InfersSignalProvider(symbol=symbol, tf=tf, config=cfg)
+
+
+register(StrategySpec(
+    name="narrow_focus_mtf",
+    build=_build_narrow_focus_mtf,
+    description="Narrow Focus マルチTF変種 (判定H1/押し目H4/方向D1。depth50と同一フィルター"
+                "構成のTF移植。実測実験。narrow_focus/mtf-variant.md 参照)",
+    report_spec=NARROW_FOCUS_REPORT_SPEC,
+    gate="rule",       # T15マージ後: 同じNF特徴量スキーマのためルールゲートが機能する
+))
+
+
 def _build_market_tpsl(*, symbol: str, tf: Timeframe) -> SignalProvider:
     """SMAクロス手法の分析層 (段階2.5: 執行モデル抽象の実証用)。"""
     from infers.strategies.market_tpsl.provider import SmaCrossProvider
