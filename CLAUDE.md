@@ -88,6 +88,7 @@ docstring)。手法は `--strategy <名前>`(レジストリ登録名)で選択�
 | `/bit-check` Skill | 完了ゲート(pytest全合格+depth50強いビット一致)のワンコマンド検証 |
 | `/annual-breakdown <report_dir>` Skill(`tools/annual_breakdown.py`) | レポートの年次分解+過剰適合警告(定石6) |
 | `/sweep` Skill(`tools/sweep.py`) | 手法非依存パラメータ・スイープ・ハーネス。ベースライン自己検証+年次分解強制+非単調振動(過剰適合疑い)の自動検出(改善プラン T9) |
+| `python tools/portfolio_correlation.py` | 手法間の日次損益相関+等倍単純合算ポートフォリオの合成DD・最悪同時損失日を算出(改善プラン T11) |
 
 - テストはCIで `pytest` 全件を必須とする。状態機械・注文ロジックの変更はプロパティテスト追加なしにマージしない。
 - ゴールデンリプレイ(同一入力→同一判断の回帰検証)は `tests/test_journal.py` でカバー。ルールゲート($0・決定論)のセッションについて、ジャーナルの特徴量スナップショットから判定が再現されることを検証する。
