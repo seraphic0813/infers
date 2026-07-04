@@ -23,6 +23,7 @@
 | `market_tpsl` | — | **運用非対象**(執行抽象が手法非依存であることの実証用。SMAクロス+成行/固定TP-SL) | — |
 | `smc_bos` | XAUUSD M30(2口座目) | **ライブ凍結(2026-07-03)**。SMC BOS+EMA80フィルタ+成行/固定RR利確。年次分解で平常年(2022年PF0.801)赤字・2026年依存が確定し稼働停止(詳細・再開条件は [smc_bos/spec.md](src/infers/strategies/smc_bos/spec.md)「ライブ凍結ステータス」節) | 全期間PF 1.456322103(年次フロア不合格) |
 | `atr_trend_scalp` | XAUUSD M5(3口座目) | **コア(攻撃的)**。ハイブリッドATRトレンドフォロー・スキャルピング(建値化+トレール)。実口座昇格はスリッページ耐性・デモ約定検証が条件(詳細は [atr_trend_scalp/spec.md](src/infers/strategies/atr_trend_scalp/spec.md)) | PF 1.550419248 / 2,963トレード / DD $71.02 / 勝率59.91%(全暦年PF>1.35) |
+| `narrow_focus_mtf` | XAUUSD H1(narrow_focusのM1変種) | **不採用(参考記録)・運用非対象**。depth50を一切変更しないH1判定足+D1マクロの変種。事前宣言基準(全暦年PF>1.2かつ買い側黒字)に両方未達で不採用確定(詳細は [narrow_focus/mtf-variant.md](src/infers/strategies/narrow_focus/mtf-variant.md)) | 全期間PF 0.670338236 / 80トレード / 買い側PF 0.421(赤字) |
 
 **手法はマージされて main に入って初めて「登録済み」とみなす。** 未マージのブランチ上の実装を
 本表・CLAUDE.md に「登録済み」と記載しない(過去に atr_trend_scalp が未マージのまま記載され
@@ -74,7 +75,7 @@ docstring)。手法は `--strategy <名前>`(レジストリ登録名)で選択�
 
 | コマンド | 用途 |
 |---|---|
-| `pytest` / `pytest -m property` | 単体テスト / hypothesis プロパティテスト(状態機械の不変条件)。418件合格(2026-07時点) |
+| `pytest` / `pytest -m property` | 単体テスト / hypothesis プロパティテスト(状態機械の不変条件)。524件合格(2026-07時点) |
 | `python -m infers.main --mode backtest --data <parquet> [--strategy <名前>] [--report DIR] ...` | L0決定論スイープ+ルールベース($0)/キャッシュ済みverdictでのバックテスト。v1.0確定構成は `reports/README.md` 再生成コマンド参照。期間スライスは `--from`/`--to`/`--last` |
 | `python -m infers.main --mode backtest --data data/xauusd_m5.parquet --strategy atr_trend_scalp --ai-client none --report reports/atr_trend_scalp_full` | atr_trend_scalp(3口座目候補)の再現バックテスト例。詳細は [atr_trend_scalp/spec.md](src/infers/strategies/atr_trend_scalp/spec.md) |
 | `python -m infers.main --mode judge --data <parquet> --batch [--tier L1\|L2]` | Pass1: 裁定イベントをBatch APIリクエスト(JSONL)に書き出す(**現状不使用。撤去候補**。下記AI層規約参照) |
