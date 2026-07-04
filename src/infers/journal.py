@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -58,6 +59,9 @@ class JournalWriter:
         self._seq = 0
         self._clock = clock
         self._cur_bar: datetime | None = None
+        # ハートビート(改善プランT12/T13)がメインループと別スレッドから
+        # record() を呼び得るため、seq採番・書き込みを直列化する。
+        self._lock = threading.Lock()
 
     @property
     def path(self) -> Path:
@@ -68,17 +72,22 @@ class JournalWriter:
         self._cur_bar = bar_time
 
     def record(self, kind: str, data: dict) -> None:
-        """1イベントを1行追記して即 flush する (クラッシュ時の損失を1行に限定)。"""
-        self._seq += 1
-        line = {
-            "seq": self._seq,
-            "wall_ts": self._clock().isoformat(),
-            "bar_time": self._cur_bar.isoformat() if self._cur_bar else None,
-            "kind": kind,
-            "data": data,
-        }
-        self._fh.write(json.dumps(line, default=str, ensure_ascii=False) + "\n")
-        self._fh.flush()
+        """1イベントを1行追記して即 flush する (クラッシュ時の損失を1行に限定)。
+
+        メインループとハートビートスレッド(改善プランT13)の同時呼び出しに
+        備え、採番・書き込みをロックで直列化する。
+        """
+        with self._lock:
+            self._seq += 1
+            line = {
+                "seq": self._seq,
+                "wall_ts": self._clock().isoformat(),
+                "bar_time": self._cur_bar.isoformat() if self._cur_bar else None,
+                "kind": kind,
+                "data": data,
+            }
+            self._fh.write(json.dumps(line, default=str, ensure_ascii=False) + "\n")
+            self._fh.flush()
 
     def fsm_sink(self, position_id: str) -> Callable[[str, dict], None]:
         """PositionFSM へ注入する遷移コールバックを返す (全状態遷移を FSM イベント化)。"""

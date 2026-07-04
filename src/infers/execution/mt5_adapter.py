@@ -423,6 +423,7 @@ class LiveRunner:
         warm_bars: int = 0,                       # 起動前にプロバイダーへ食わせる歴史バー数 (0=無効)
         volume_sizer=None,                        # VolumeSizer | None
         execution_factory: "Callable[..., ExecutionModel] | None" = None,
+        heartbeat_interval_s: float = 300.0,       # 無音検知用ハートビート間隔(改善プランT13。0で無効)
     ) -> None:
         self._feed = feed
         self._spec = spec
@@ -432,6 +433,7 @@ class LiveRunner:
         self._risk = risk
         self._event_source = event_source or (lambda _c: broker.poll_events())
         self._spread_fn = spread_fn or broker.current_spread_ticks
+        self._heartbeat_interval_s = heartbeat_interval_s
         self._journal = journal
         # ライブ EquityProvider: MT5LiveBroker が equity() を実装しているので直接注入。
         equity_prov = broker if volume_sizer is not None else None
@@ -555,32 +557,58 @@ class LiveRunner:
         self._maybe_reconcile("startup")
         self._maybe_journal_kill_switch()
         bars = 0
-        for candle in self._feed.iter_closed(self._spec, self._tf, stop=stop):
-            # ウォームアップ済み区間のバーが iter_closed から重複流入した場合はスキップ。
-            # (テスト用 FakeFeed や遅延ポーリング時に get_history と iter_closed が重複)
-            if warm_until is not None and candle.open_time <= warm_until:
-                continue
-            # 切断から復帰した直後は、新規判断の前に状態を実態へ合わせ直す
-            seen = getattr(self._feed, "reconnect_count", 0)
-            if seen != self._last_reconnect_seen:
-                self._last_reconnect_seen = seen
-                self._maybe_reconcile("post-reconnect")
+        heartbeat_stop, heartbeat_thread = self._start_heartbeat()
+        try:
+            for candle in self._feed.iter_closed(self._spec, self._tf, stop=stop):
+                # ウォームアップ済み区間のバーが iter_closed から重複流入した場合はスキップ。
+                # (テスト用 FakeFeed や遅延ポーリング時に get_history と iter_closed が重複)
+                if warm_until is not None and candle.open_time <= warm_until:
+                    continue
+                # 切断から復帰した直後は、新規判断の前に状態を実態へ合わせ直す
+                seen = getattr(self._feed, "reconnect_count", 0)
+                if seen != self._last_reconnect_seen:
+                    self._last_reconnect_seen = seen
+                    self._maybe_reconcile("post-reconnect")
 
-            self.loop.on_broker_events(self._event_source(candle))
-            output = self._provider.on_candle(candle)
-            self.loop.on_candle(candle, output, spread_ticks=self._spread_fn())
-            bars += 1
+                self.loop.on_broker_events(self._event_source(candle))
+                output = self._provider.on_candle(candle)
+                self.loop.on_candle(candle, output, spread_ticks=self._spread_fn())
+                bars += 1
 
-            # 定期リコンサイル (安全網: あらゆる原因のズレを上限間隔内に検出)
-            self._bars_since_reconcile += 1
-            if (self._reconcile_every_bars
-                    and self._bars_since_reconcile >= self._reconcile_every_bars):
-                self._maybe_reconcile("periodic")
-            self._maybe_journal_kill_switch()
+                # 定期リコンサイル (安全網: あらゆる原因のズレを上限間隔内に検出)
+                self._bars_since_reconcile += 1
+                if (self._reconcile_every_bars
+                        and self._bars_since_reconcile >= self._reconcile_every_bars):
+                    self._maybe_reconcile("periodic")
+                self._maybe_journal_kill_switch()
 
-            if max_bars is not None and bars >= max_bars:
-                break
-        return bars
+                if max_bars is not None and bars >= max_bars:
+                    break
+            return bars
+        finally:
+            heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=1.0)
+
+    def _start_heartbeat(self) -> tuple[threading.Event, "threading.Thread | None"]:
+        """無音検知用ハートビート(改善プランT13)。
+
+        確定足が長時間流れない(フィード無音)場合でも、稼働プロセスが生きて
+        いることを一定間隔でジャーナルへ記録する。バーの到着有無に依存しない
+        独立スレッドで駆動する(バー駆動の記録だけでは「バーが来ない」という
+        障害そのものを検知できないため)。
+        """
+        stop_event = threading.Event()
+        if self._journal is None or self._heartbeat_interval_s <= 0:
+            return stop_event, None
+
+        def _loop() -> None:
+            while not stop_event.wait(self._heartbeat_interval_s):
+                self._journal.record("HEARTBEAT", {})
+
+        thread = threading.Thread(target=_loop, daemon=True, name="infers-heartbeat")
+        thread.start()
+        return stop_event, thread
 
     def shutdown(self, reason: str = "SHUTDOWN") -> list[str]:
         """未約定指値の取消と残玉の手仕舞い (常駐停止時)。"""

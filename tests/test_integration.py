@@ -884,7 +884,8 @@ class _ReconnectingFeed(MarketFeed):
 
 
 class TestReconcileCadence:
-    def _runner(self, *, feed, broker, reconcile_every_bars, journal=None):
+    def _runner(self, *, feed, broker, reconcile_every_bars, journal=None,
+               heartbeat_interval_s=300.0):
         return LiveRunner(
             feed=feed, spec=GOLD, tf=Timeframe.M5, broker=broker,
             provider=ScriptedProvider({}),                # 発注なし → フラット
@@ -893,7 +894,8 @@ class TestReconcileCadence:
             fsm_config=FsmConfig(min_be_distance_ticks=10, be_offset_ticks=2,
                                  breakout_buffer_ticks=10),
             event_source=broker.process_bar, spread_fn=lambda: 2,
-            reconcile_every_bars=reconcile_every_bars, journal=journal)
+            reconcile_every_bars=reconcile_every_bars, journal=journal,
+            heartbeat_interval_s=heartbeat_interval_s)
 
     def test_periodic_reconcile_runs_every_n_bars(self):
         broker = LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5)
@@ -940,6 +942,69 @@ class TestReconcileCadence:
         reasons = [r.data["reason"] for r in recs]
         assert "startup" in reasons and "periodic" in reasons
         assert all(r.data["ok"] for r in recs)            # 一致スナップショット → 全て ok
+
+    def test_heartbeat_disabled_emits_nothing(self, tmp_path):
+        """heartbeat_interval_s<=0 ではハートビートスレッドを起動しない(既定無効化)。"""
+        from infers.journal import JournalWriter, read_journal
+        broker = LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        journal = JournalWriter(tmp_path / "hb.jsonl")
+        runner = self._runner(feed=FakeFeed(CANDLES), broker=broker,
+                              reconcile_every_bars=0, journal=journal,
+                              heartbeat_interval_s=0)
+        runner.run(max_bars=3)
+        journal.close()
+        recs = [e for e in read_journal(tmp_path / "hb.jsonl") if e.kind == "HEARTBEAT"]
+        assert recs == []
+
+    def test_heartbeat_thread_stops_cleanly_after_run(self, tmp_path):
+        """run() 終了時にハートビートスレッドが確実に停止する(スレッドリーク防止)。
+
+        短い run() の間隔よりずっと長い heartbeat_interval_s(実質発火しない値)を
+        与え、run() 完了直後にスレッドが生存していないことを確認する。
+        """
+        import threading as _threading
+        from infers.journal import JournalWriter
+        broker = LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        journal = JournalWriter(tmp_path / "hb2.jsonl")
+        runner = self._runner(feed=FakeFeed(CANDLES), broker=broker,
+                              reconcile_every_bars=0, journal=journal,
+                              heartbeat_interval_s=9999)
+        before = {t.name for t in _threading.enumerate()}
+        runner.run(max_bars=3)
+        journal.close()
+        after = {t.name for t in _threading.enumerate()}
+        assert "infers-heartbeat" not in after
+        assert after - before == set() or "infers-heartbeat" not in (after - before)
+
+    def test_heartbeat_fires_while_feed_is_silent(self, tmp_path):
+        """フィードが確定足を流さない(無音)間もハートビートは独立して発火する
+        (バー駆動の記録では検知できない「バーが来ない」障害そのものの検知)。"""
+        import threading as _threading_mod
+        import time as _time
+        from infers.journal import JournalWriter, read_journal
+
+        class _SilentFeed:
+            def iter_closed(self, spec, tf, *, stop=None):
+                while stop is None or not stop.wait(0.01):
+                    if stop is not None and stop.is_set():
+                        return
+                return
+                yield  # pragma: no cover
+
+        broker = LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        journal = JournalWriter(tmp_path / "hb3.jsonl")
+        runner = self._runner(feed=_SilentFeed(), broker=broker,
+                              reconcile_every_bars=0, journal=journal,
+                              heartbeat_interval_s=0.05)
+        stop = _threading_mod.Event()
+        t = _threading_mod.Thread(target=runner.run, kwargs={"stop": stop}, daemon=True)
+        t.start()
+        _time.sleep(0.2)
+        stop.set()
+        t.join(timeout=2.0)
+        journal.close()
+        recs = [e for e in read_journal(tmp_path / "hb3.jsonl") if e.kind == "HEARTBEAT"]
+        assert len(recs) >= 1
 
 
 class TestLiveRunnerExecutionFactory:

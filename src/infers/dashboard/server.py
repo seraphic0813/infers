@@ -244,11 +244,18 @@ async function refreshAccounts(){
       : '<span class="muted">設定済みターミナルがありません</span>';
   } catch(e){}
 }
+const SILENCE_WARN_SECONDS = 900;  // ハートビート既定間隔(300秒)の3倍。表示専用の目安値
 function renderJournalBlock(j){
   const golden = j.ai_client==='rule'
     ? (j.golden.ok
         ? `<span class="ok">ゴールデンリプレイ OK (${j.golden.checked}件一致)</span>`
         : `<span class="err">退行検出: ${JSON.stringify(j.golden.mismatches)}</span>`)
+    : '';
+  const ks = j.kill_switch && j.kill_switch.engaged
+    ? `<span class="err">⚠ キルスイッチ作動中: ${j.kill_switch.reason||'?'}</span>`
+    : '';
+  const silence = (j.silence_seconds != null && j.silence_seconds > SILENCE_WARN_SECONDS)
+    ? `<span class="err">⚠ 無音 ${Math.round(j.silence_seconds/60)}分(直近イベントなし)</span>`
     : '';
   const pos = Object.entries(j.positions||{}).map(
     ([pid,tl])=>`<div><code>${pid}</code> : ${tl.join(' → ')}</div>`).join('')
@@ -257,7 +264,7 @@ function renderJournalBlock(j){
     `<tr><td>${e.seq}</td><td>${e.kind}</td><td>${e.bar_time||''}</td>
      <td><code>${JSON.stringify(e.data).slice(0,140)}</code></td></tr>`).join('');
   return `<div style="margin-bottom:14px">
-    <div><strong><code>${j.name}</code></strong> ${golden}</div>
+    <div><strong><code>${j.name}</code></strong> ${golden} ${ks} ${silence}</div>
     <div>${pos}</div>
     <table><thead><tr><th>seq</th><th>kind</th><th>bar_time</th><th>data</th></tr></thead>
     <tbody>${rows}</tbody></table>

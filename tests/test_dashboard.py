@@ -298,6 +298,26 @@ class TestMonitor:
         assert s["kill_switch"]["engaged"] is False
         assert s["kill_switch"]["reason"] is None
 
+    def test_summarize_silence_seconds_reflects_last_event_age(self, tmp_path):
+        """改善プランT13: 無音検知(silence_seconds)。"""
+        from datetime import datetime, timedelta, timezone
+
+        from infers.journal import JournalWriter
+
+        path = tmp_path / "XAUUSD_test.jsonl"
+        old_ts = datetime.now(timezone.utc) - timedelta(seconds=500)
+        jw = JournalWriter(path, clock=lambda: old_ts)
+        jw.record("SESSION", {"mode": "live", "symbol": "XAUUSD", "ai_client": "rule"})
+        jw.close()
+
+        s = monitor.summarize(path)
+        assert s["silence_seconds"] is not None
+        assert 495 <= s["silence_seconds"] <= 510
+
+    def test_summarize_missing_file_silence_is_none(self, tmp_path):
+        s = monitor.summarize(tmp_path / "nope.jsonl")
+        assert s["silence_seconds"] is None
+
 
 class TestAggregatePortfolio:
     def test_sums_connected_accounts_only(self):

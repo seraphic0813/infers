@@ -148,6 +148,33 @@ class TestJournalPersistence:
         verdicts = [e for e in read_journal(path) if e.kind == "VERDICT"]
         assert verdicts[0].bar_time is not None             # 確定足にアンカーされている
 
+    def test_concurrent_record_from_multiple_threads_is_safe(self, tmp_path):
+        """改善プランT13: ハートビートスレッドとメインループの同時record()呼び出しで
+        seq採番の重複・行破損が起きない(JournalWriterのロック追加の回帰防止)。"""
+        import threading
+
+        from infers.journal import JournalWriter
+
+        path = tmp_path / "concurrent.jsonl"
+        journal = JournalWriter(path)
+        n_per_thread = 50
+
+        def writer(tag: str) -> None:
+            for i in range(n_per_thread):
+                journal.record("TEST", {"tag": tag, "i": i})
+
+        threads = [threading.Thread(target=writer, args=(f"t{k}",)) for k in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        journal.close()
+
+        events = list(read_journal(path))
+        assert len(events) == 4 * n_per_thread
+        seqs = [e.seq for e in events]
+        assert sorted(seqs) == list(range(1, len(events) + 1))   # 重複・欠番なし
+
 
 class TestGoldenReplay:
     def test_rule_session_replays_identically(self, tmp_path):

@@ -89,6 +89,8 @@ docstring)。手法は `--strategy <名前>`(レジストリ登録名)で選択�
 | `/annual-breakdown <report_dir>` Skill(`tools/annual_breakdown.py`) | レポートの年次分解+過剰適合警告(定石6) |
 | `/sweep` Skill(`tools/sweep.py`) | 手法非依存パラメータ・スイープ・ハーネス。ベースライン自己検証+年次分解強制+非単調振動(過剰適合疑い)の自動検出(改善プラン T9) |
 | `python tools/portfolio_correlation.py` | 手法間の日次損益相関+等倍単純合算ポートフォリオの合成DD・最悪同時損失日を算出(改善プラン T11) |
+| `python tools/daily_reconciliation.py <journal> --terminal-path <path>` | ジャーナルの退出イベント件数とMT5実約定履歴を突合し乖離を検出(表示のみ・自動修復なし。改善プラン T13 OPS-3) |
+| `scripts\register_watchdog_task.ps1`(ローカルのみ・gitignore対象) | PC再起動後の自動起動をWindowsタスクスケジューラへ登録(要手動実行・管理者権限。改善プラン T13 OPS-1) |
 
 - テストはCIで `pytest` 全件を必須とする。状態機械・注文ロジックの変更はプロパティテスト追加なしにマージしない。
 - ゴールデンリプレイ(同一入力→同一判断の回帰検証)は `tests/test_journal.py` でカバー。ルールゲート($0・決定論)のセッションについて、ジャーナルの特徴量スナップショットから判定が再現されることを検証する。

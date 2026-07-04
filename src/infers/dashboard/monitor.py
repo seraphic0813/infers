@@ -52,6 +52,24 @@ def _position_timelines(events) -> dict[str, list[str]]:
     return timelines
 
 
+def _silence_seconds(events, *, now: datetime | None = None) -> float | None:
+    """最終イベントの wall_ts からの経過秒数(改善プランT13: 無音検知)。
+
+    イベントが1件も無い、または wall_ts が壊れている場合は None を返す
+    (「無音警告」の判定に使う側で「判定不能」として扱う)。
+    """
+    now = now or datetime.now(timezone.utc)
+    for ev in reversed(events):
+        if not ev.wall_ts:
+            continue
+        try:
+            ts = datetime.fromisoformat(ev.wall_ts)
+        except ValueError:
+            continue
+        return (now - ts).total_seconds()
+    return None
+
+
 def aggregate_portfolio(account_snapshots: list[dict],
                         journal_summaries: list[dict]) -> dict:
     """複数口座(accounts.account_snapshot結果)・複数ジャーナル(summarize結果)を
@@ -120,6 +138,7 @@ def summarize(path: str | Path, *, from_ts: datetime | None = None,
             "recent_events": [],
             "golden": {"checked": 0, "ok": True, "mismatches": []},
             "kill_switch": {"engaged": False, "reason": None, "seq": None, "bar_time": None},
+            "silence_seconds": None,
         }
 
     events = list(read_journal(p))
@@ -153,4 +172,5 @@ def summarize(path: str | Path, *, from_ts: datetime | None = None,
             "mismatches": [list(m) for m in result.mismatches],
         },
         "kill_switch": _kill_switch_status(events),
+        "silence_seconds": _silence_seconds(events),
     }
