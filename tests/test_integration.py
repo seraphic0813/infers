@@ -385,7 +385,7 @@ from infers.execution.mt5_adapter import (  # noqa: E402
 )
 
 
-def make_runner_with_risk(client: FakeClient):
+def make_runner_with_risk(client: FakeClient, *, journal=None):
     broker = LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5)
     risk = RiskManager(RiskConfig(max_position_volume_steps=4, max_total_volume_steps=8,
                                   max_spread_ticks=10, daily_loss_limit_tick_steps=10_000))
@@ -398,6 +398,7 @@ def make_runner_with_risk(client: FakeClient):
                              breakout_buffer_ticks=10),
         event_source=broker.process_bar,
         spread_fn=lambda: 2,
+        journal=journal,
     )
     return runner, broker, risk
 
@@ -448,6 +449,31 @@ class TestReconcile:
         report = runner.reconcile()
         assert not report.ok and report.orphans == ["ghost"]
         assert risk.kill_switch_engaged                 # 新規は全拒否 (人間確認待ち)
+
+    def test_kill_switch_engagement_is_journaled_once(self, tmp_path):
+        """キルスイッチのFalse→True遷移が1回だけKILL_SWITCH_ENGAGEDとして記録される
+        (改善プランT12: ダッシュボードの口座横断モニタが読み取る信号)。"""
+        from infers.journal import JournalWriter, read_journal
+        journal = JournalWriter(tmp_path / "ks.jsonl")
+        runner, broker, risk = make_runner_with_risk(FakeClient(), journal=journal)
+        runner.run(max_bars=3)
+        broker.snapshot = lambda: BrokerSnapshot(
+            positions={
+                "live1": BrokerPositionState(volume_steps=2, sl_int=960,
+                                             avg_entry_int=990),
+                "ghost": BrokerPositionState(volume_steps=9, sl_int=0,
+                                             avg_entry_int=1234),
+            },
+            pending=frozenset())
+        runner.reconcile()
+        assert risk.kill_switch_engaged
+        # run()経由の検知メソッドを2回呼んでも記録は1回だけ(冪等)
+        runner._maybe_journal_kill_switch()
+        runner._maybe_journal_kill_switch()
+        journal.close()
+        recs = [e for e in read_journal(tmp_path / "ks.jsonl") if e.kind == "KILL_SWITCH_ENGAGED"]
+        assert len(recs) == 1
+        assert "RECONCILE_MISMATCH" in recs[0].data["reason"]
 
     def test_sl_drift_repaired_from_local_truth(self):
         """SLの正は単調性保証済みのローカル値 → ブローカー側を修復する。"""

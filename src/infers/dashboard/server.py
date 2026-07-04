@@ -102,6 +102,20 @@ def make_handler(controller: LiveController, *, token: str, default_symbol: str,
                         for label, p in account_specs
                     ]
                 })
+            elif path == "/api/portfolio":
+                # 口座横断モニタ (改善プランT12): 全口座のXAUUSD建玉合計・当日
+                # 合算実現損益・各ジャーナルのキルスイッチ状態を集約する。
+                # **表示・警告専用。自動アクションは行わない**(monitor.aggregate_portfolio
+                # のdocstring参照)。
+                account_snaps = [
+                    accounts.account_snapshot(p, label=label)
+                    for label, p in account_specs
+                ]
+                journal_summaries = [
+                    {"name": f.name, **monitor.summarize(f)}
+                    for f in monitor.list_journal_files()
+                ]
+                self._send_json(monitor.aggregate_portfolio(account_snaps, journal_summaries))
             else:
                 self._send_json({"error": "not found"}, status=404)
 
@@ -193,6 +207,10 @@ _INDEX_HTML = """<!DOCTYPE html>
 <body>
 <h1>INFERS 監視ダッシュボード <span class="muted">(読み取り専用・トレード操作なし)</span></h1>
 <div class="card">
+  <h3 style="margin-top:0">口座横断サマリ <span class="muted">(全口座合算・表示専用。自動アクションなし。自動更新: 10秒)</span></h3>
+  <div id="portfolio" class="muted">読み込み中...</div>
+</div>
+<div class="card">
   <h3 style="margin-top:0">現在接続中のMT5口座
     <span class="muted">(読み取り専用・自動更新: 10秒)</span></h3>
   <div id="accounts" class="muted">読み込み中...</div>
@@ -254,9 +272,29 @@ async function refreshAllJournals(){
       : '<span class="muted">work/journal/ にファイルがありません</span>';
   } catch(e){}
 }
+function renderPortfolio(p){
+  const ksHtml = p.any_kill_switch_engaged
+    ? `<div class="err"><strong>⚠ キルスイッチ作動中:</strong> `
+      + p.kill_switches_engaged.map(k=>`${k.name} (${k.reason||'?'})`).join(', ') + `</div>`
+    : `<span class="ok">キルスイッチ: 全口座正常</span>`;
+  return `<table>
+    <tr><th>接続中の口座</th><td>${p.accounts_connected} / ${p.accounts_total}</td></tr>
+    <tr><th>XAUUSD建玉合計(買/売/net)</th>
+        <td>${p.total_long_lots} / ${p.total_short_lots} / ${p.total_net_lots} lot</td></tr>
+    <tr><th>当日合算実現損益</th><td>${p.today_realized_usd_total} USD</td></tr>
+  </table>
+  <div style="margin-top:8px">${ksHtml}</div>`;
+}
+async function refreshPortfolio(){
+  try {
+    const p = await (await fetch('/api/portfolio')).json();
+    document.getElementById('portfolio').innerHTML = renderPortfolio(p);
+  } catch(e){}
+}
 setInterval(refreshAccounts, 10000);
 setInterval(refreshAllJournals, 10000);
-refreshAccounts(); refreshAllJournals();
+setInterval(refreshPortfolio, 10000);
+refreshAccounts(); refreshAllJournals(); refreshPortfolio();
 </script>
 </body>
 </html>

@@ -639,6 +639,16 @@ class TestRiskManager:
         rm.reset_kill_switch()
         assert rm.approve(req(), current_spread_ticks=1, open_total_volume_steps=0)
 
+    def test_kill_reason_reflects_engagement(self):
+        """kill_reason は未作動時は空文字列、作動後は理由を保持する(改善プランT12:
+        ダッシュボードの口座横断モニタが読み取る想定の読み取り専用プロパティ)。"""
+        rm = RiskManager(RISK_CFG)
+        assert rm.kill_reason == ""
+        rm.engage_kill_switch("TEST_REASON")
+        assert rm.kill_reason == "TEST_REASON"
+        rm.reset_kill_switch()
+        assert rm.kill_reason == ""
+
     def test_invalid_config_rejected(self):
         with pytest.raises(ValueError):
             RiskConfig(max_position_volume_steps=0, max_total_volume_steps=6,

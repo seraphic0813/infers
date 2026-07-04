@@ -52,6 +52,56 @@ def _position_timelines(events) -> dict[str, list[str]]:
     return timelines
 
 
+def aggregate_portfolio(account_snapshots: list[dict],
+                        journal_summaries: list[dict]) -> dict:
+    """複数口座(accounts.account_snapshot結果)・複数ジャーナル(summarize結果)を
+    単純合算する(改善プランT12: 口座横断モニタ)。
+
+    **表示・警告専用。自動アクションは一切行わない**(各ライブプロセスの独立性・
+    決定論を守るため、口座横断の自動介入は実装しない設計判断。改善レポート
+    「PT-2」節参照)。
+    """
+    connected = [a for a in account_snapshots if a.get("connected")]
+    total_long = sum(a.get("long_lots", 0.0) for a in connected)
+    total_short = sum(a.get("short_lots", 0.0) for a in connected)
+    total_realized = sum(a.get("today_realized_usd", 0.0) for a in connected)
+    kill_switches = [
+        {"name": j.get("name"), "reason": j.get("kill_switch", {}).get("reason")}
+        for j in journal_summaries
+        if j.get("kill_switch", {}).get("engaged")
+    ]
+    return {
+        "accounts_connected": len(connected),
+        "accounts_total": len(account_snapshots),
+        "total_long_lots": round(total_long, 2),
+        "total_short_lots": round(total_short, 2),
+        "total_net_lots": round(total_long - total_short, 2),
+        "today_realized_usd_total": round(total_realized, 2),
+        "kill_switches_engaged": kill_switches,
+        "any_kill_switch_engaged": bool(kill_switches),
+    }
+
+
+def _kill_switch_status(events) -> dict:
+    """KILL_SWITCH_ENGAGED イベント(改善プランT12。execution/mt5_adapter.py が
+    キルスイッチのFalse→True遷移を検知した際に1回だけ記録)の有無を要約する。
+
+    表示・警告専用(自動アクションはしない)。作動していなければ engaged=False。
+    """
+    last = None
+    for ev in events:
+        if ev.kind == "KILL_SWITCH_ENGAGED":
+            last = ev
+    if last is None:
+        return {"engaged": False, "reason": None, "seq": None, "bar_time": None}
+    return {
+        "engaged": True,
+        "reason": last.data.get("reason"),
+        "seq": last.seq,
+        "bar_time": last.bar_time,
+    }
+
+
 def summarize(path: str | Path, *, from_ts: datetime | None = None,
               recent: int = 50) -> dict:
     """1 つのジャーナルファイルを監視パネル向け dict に要約する。
@@ -69,6 +119,7 @@ def summarize(path: str | Path, *, from_ts: datetime | None = None,
             "positions": {},
             "recent_events": [],
             "golden": {"checked": 0, "ok": True, "mismatches": []},
+            "kill_switch": {"engaged": False, "reason": None, "seq": None, "bar_time": None},
         }
 
     events = list(read_journal(p))
@@ -101,4 +152,5 @@ def summarize(path: str | Path, *, from_ts: datetime | None = None,
             "ok": result.ok,
             "mismatches": [list(m) for m in result.mismatches],
         },
+        "kill_switch": _kill_switch_status(events),
     }

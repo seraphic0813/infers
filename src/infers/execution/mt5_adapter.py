@@ -449,6 +449,9 @@ class LiveRunner:
         self._bars_since_reconcile = 0
         self._last_reconnect_seen = getattr(feed, "reconnect_count", 0)
         self._warm_bars = warm_bars
+        # キルスイッチ作動の一過性検知 (改善プランT12): False→True遷移した瞬間のみ
+        # 1回だけジャーナルへ記録する (毎バー同じイベントを重複記録しないため)。
+        self._kill_switch_journaled = False
 
     def reconcile(self, *, reason: str = "startup") -> ReconcileReport:
         """ローカル状態機械とブローカー実態の強制同期 (起動時・再接続時・定期)。
@@ -482,6 +485,20 @@ class LiveRunner:
         """ブローカーが snapshot を提供する場合のみ同期する (Sim等は no-op)。"""
         if hasattr(self._broker, "snapshot"):
             self.reconcile(reason=reason)
+
+    def _maybe_journal_kill_switch(self) -> None:
+        """キルスイッチが False→True に遷移した瞬間だけ1回ジャーナルへ記録する
+        (改善プランT12: ダッシュボードの口座横断モニタが読み取る想定の信号)。
+
+        トリガー種別(リコンサイル不一致・日次損失上限など)を問わず、
+        `self._risk.kill_switch_engaged` の状態を見るだけの一般化した検知にする
+        (将来トリガーが増えても本メソッドの変更は不要)。
+        """
+        if not self._risk.kill_switch_engaged or self._kill_switch_journaled:
+            return
+        self._kill_switch_journaled = True
+        if self._journal is not None:
+            self._journal.record("KILL_SWITCH_ENGAGED", {"reason": self._risk.kill_reason})
 
     def _warm_provider(self) -> "datetime | None":
         """プロバイダーをウォームアップする (ブローカー/ループは通さない)。
@@ -536,6 +553,7 @@ class LiveRunner:
         """
         warm_until = self._warm_provider()
         self._maybe_reconcile("startup")
+        self._maybe_journal_kill_switch()
         bars = 0
         for candle in self._feed.iter_closed(self._spec, self._tf, stop=stop):
             # ウォームアップ済み区間のバーが iter_closed から重複流入した場合はスキップ。
@@ -558,6 +576,7 @@ class LiveRunner:
             if (self._reconcile_every_bars
                     and self._bars_since_reconcile >= self._reconcile_every_bars):
                 self._maybe_reconcile("periodic")
+            self._maybe_journal_kill_switch()
 
             if max_bars is not None and bars >= max_bars:
                 break
