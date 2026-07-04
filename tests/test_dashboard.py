@@ -270,6 +270,91 @@ class TestMonitor:
         s = monitor.summarize(tmp_path / "nope.jsonl")
         assert s["exists"] is False
         assert s["bars"] == 0
+        assert s["kill_switch"]["engaged"] is False
+
+    def test_summarize_surfaces_kill_switch_engagement(self, tmp_path):
+        """改善プランT12: KILL_SWITCH_ENGAGEDイベントがsummarizeで表示される。"""
+        from infers.journal import JournalWriter
+
+        path = tmp_path / "XAUUSD_test.jsonl"
+        jw = JournalWriter(path)
+        jw.record("SESSION", {"mode": "live", "symbol": "XAUUSD", "ai_client": "rule"})
+        jw.record("KILL_SWITCH_ENGAGED", {"reason": "RECONCILE_MISMATCH: ghost"})
+        jw.close()
+
+        s = monitor.summarize(path)
+        assert s["kill_switch"]["engaged"] is True
+        assert s["kill_switch"]["reason"] == "RECONCILE_MISMATCH: ghost"
+
+    def test_summarize_no_kill_switch_event_means_not_engaged(self, tmp_path):
+        from infers.journal import JournalWriter
+
+        path = tmp_path / "XAUUSD_test.jsonl"
+        jw = JournalWriter(path)
+        jw.record("SESSION", {"mode": "live", "symbol": "XAUUSD", "ai_client": "rule"})
+        jw.close()
+
+        s = monitor.summarize(path)
+        assert s["kill_switch"]["engaged"] is False
+        assert s["kill_switch"]["reason"] is None
+
+    def test_summarize_silence_seconds_reflects_last_event_age(self, tmp_path):
+        """改善プランT13: 無音検知(silence_seconds)。"""
+        from datetime import datetime, timedelta, timezone
+
+        from infers.journal import JournalWriter
+
+        path = tmp_path / "XAUUSD_test.jsonl"
+        old_ts = datetime.now(timezone.utc) - timedelta(seconds=500)
+        jw = JournalWriter(path, clock=lambda: old_ts)
+        jw.record("SESSION", {"mode": "live", "symbol": "XAUUSD", "ai_client": "rule"})
+        jw.close()
+
+        s = monitor.summarize(path)
+        assert s["silence_seconds"] is not None
+        assert 495 <= s["silence_seconds"] <= 510
+
+    def test_summarize_missing_file_silence_is_none(self, tmp_path):
+        s = monitor.summarize(tmp_path / "nope.jsonl")
+        assert s["silence_seconds"] is None
+
+
+class TestAggregatePortfolio:
+    def test_sums_connected_accounts_only(self):
+        accounts = [
+            {"connected": True, "long_lots": 2.0, "short_lots": 0.5, "today_realized_usd": 10.0},
+            {"connected": True, "long_lots": 1.0, "short_lots": 0.0, "today_realized_usd": -3.0},
+            {"connected": False, "long_lots": 999.0, "short_lots": 999.0,
+             "today_realized_usd": 999.0},   # 未接続は除外
+        ]
+        result = monitor.aggregate_portfolio(accounts, [])
+        assert result["accounts_connected"] == 2
+        assert result["accounts_total"] == 3
+        assert result["total_long_lots"] == 3.0
+        assert result["total_short_lots"] == 0.5
+        assert result["total_net_lots"] == 2.5
+        assert result["today_realized_usd_total"] == 7.0
+
+    def test_lists_engaged_kill_switches_only(self):
+        journals = [
+            {"name": "a.jsonl", "kill_switch": {"engaged": True, "reason": "R1"}},
+            {"name": "b.jsonl", "kill_switch": {"engaged": False, "reason": None}},
+        ]
+        result = monitor.aggregate_portfolio([], journals)
+        assert result["any_kill_switch_engaged"] is True
+        assert result["kill_switches_engaged"] == [{"name": "a.jsonl", "reason": "R1"}]
+
+    def test_no_engaged_kill_switches(self):
+        journals = [{"name": "a.jsonl", "kill_switch": {"engaged": False, "reason": None}}]
+        result = monitor.aggregate_portfolio([], journals)
+        assert result["any_kill_switch_engaged"] is False
+        assert result["kill_switches_engaged"] == []
+
+    def test_empty_inputs(self):
+        result = monitor.aggregate_portfolio([], [])
+        assert result["accounts_connected"] == 0
+        assert result["total_net_lots"] == 0.0
+        assert result["any_kill_switch_engaged"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -356,5 +441,36 @@ class TestServer:
             names = {f["name"] for f in j["files"]}
             assert names == {"narrow_focus_xauusd.jsonl", "smc_bos_xauusd.jsonl"}
             assert all(f["exists"] for f in j["files"])
+        finally:
+            httpd.shutdown()
+
+    def test_portfolio_aggregates_journals_and_accounts(self, tmp_path, monkeypatch):
+        """/api/portfolio は口座横断の集約サマリを返す(改善プランT12)。
+        存在しないターミナルパスを指定しMT5への実接続を確実に失敗させる
+        (accounts_total=1・accounts_connected=0)。集約ロジック自体は
+        TestAggregatePortfolio で個別に検証済み。"""
+        monkeypatch.chdir(tmp_path)
+        jdir = tmp_path / "work" / "journal"
+        jdir.mkdir(parents=True)
+        (jdir / "narrow_focus_xauusd.jsonl").write_text(
+            '{"seq":0,"wall_ts":"2026-06-21T00:00:00Z","kind":"SESSION","data":{}}\n'
+            '{"seq":1,"wall_ts":"2026-06-21T00:00:01Z","kind":"KILL_SWITCH_ENGAGED",'
+            '"data":{"reason":"TEST"}}\n',
+            encoding="utf-8")
+
+        httpd, _token = make_server(
+            port=0, controller=_make_controller(blocking=True),
+            account_specs=[("test", "C:/nonexistent/terminal64.exe")])
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            port = httpd.server_address[1]
+            p = json.loads(
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/portfolio").read())
+            assert p["accounts_total"] == 1
+            assert p["accounts_connected"] == 0
+            assert p["any_kill_switch_engaged"] is True
+            assert p["kill_switches_engaged"] == [
+                {"name": "narrow_focus_xauusd.jsonl", "reason": "TEST"}]
         finally:
             httpd.shutdown()

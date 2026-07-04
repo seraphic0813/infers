@@ -218,9 +218,14 @@ PF 1.487396352 / DD $325.77 / 624トレード / 純益$1,440.11 / 勝率53.37% �
 - 旧 import パス(`infers.core.loop`・`infers.execution.sm`・`infers.execution`)は
   PEP 562 モジュール `__getattr__` による遅延 re-export で互換維持。これにより
   L0 のシム自身が L2 をモジュールレベルで import することもない。
-- 残課題: `analysis/dow.py` が `strategies.narrow_focus.zigzag.SwingPoint` を参照する
-  件は、`analysis/` 配下のダウ判定ロジック自体を L2 手法側へ移すか否かの別論点
-  (2.5 で2つ目の手法を入れる際に、ダウ理論が手法共通部品か Narrow Focus 固有かを判断)。
+- **解消済み(2026-07-04、改善プランT14)**: 当時「残課題」としていた
+  `analysis/dow.py` が `strategies.narrow_focus.zigzag.SwingPoint` を参照する件
+  (=ダウ判定ロジックが実際には Narrow Focus 固有であり L1 汎用部品ではなかった)を、
+  `analysis/dow.py`・`analysis/support_resistance.py` を `strategies/narrow_focus/`
+  へ `git mv` することで解消。旧パス(`infers.analysis.dow`・`infers.analysis.support_resistance`・
+  `infers.analysis`)は同型の PEP 562 遅延 re-export シムで互換維持。`grep "from infers.analysis"`
+  は L0/L1(core/indicators/execution/backtest/data/ai/dashboard)で空。
+  depth50 強いビット一致(ゲート統計込み)を確認済み。
 
 ## 8. 未解決事項 / レビューで詰めたい点
 

@@ -82,12 +82,15 @@ docstring)。手法は `--strategy <名前>`(レジストリ登録名)で選択�
 | `python -m infers.main --mode live --demo [--symbol XAUUSD] [--max-bars N] [--journal PATH]` | ライブ稼働(デモ必須。実口座は`--allow-real-account`明示が必要)。判断は追記専用ジャーナル(既定 `work/journal/<symbol>_<UTC日付>.jsonl`)へ永続化 |
 | `python -m infers.journal replay --file <path> [--from <ts>]` | ジャーナルの要約 + ゴールデン回帰検証(ルールゲートのセッションは記録済み特徴量を `judge_features` へ再投入し同一判断を確認)。実装は `src/infers/journal.py` |
 | `python -m infers.main --mode export --data <out.parquet> --years 5` | MT5からヒストリカルデータをParquetへ書き出し |
-| `python -m infers.dashboard [--port 8765] [--symbol XAUUSD]` | ローカル監視ダッシュボード(127.0.0.1のみ・標準ライブラリのみ・トレード根幹から分離)。ブラウザから口座情報入力・監視開始/安全停止・ジャーナル監視。内部はlive稼働と同一経路を呼ぶだけ。資格情報はメモリ保持のみ。実装は `src/infers/dashboard/` |
+| `python -m infers.dashboard [--port 8765] [--symbol XAUUSD]` | ローカル監視ダッシュボード(127.0.0.1のみ・標準ライブラリのみ・トレード根幹から分離)。ブラウザから口座情報入力・監視開始/安全停止・ジャーナル監視+**口座横断サマリ**(全口座のXAUUSD建玉合計・当日合算実現損益・各ジャーナルのキルスイッチ状態を集約表示。表示・警告専用、自動アクションなし。改善プラン T12)。内部はlive稼働と同一経路を呼ぶだけ。資格情報はメモリ保持のみ。実装は `src/infers/dashboard/` |
 | `python -m infers.main --mode backtest ... --slippage-ticks N` | 約定現実性ストレステスト: 成行参入・成行決済・保護SL/トレール決済を不利方向へNティックずらす(指値は対象外)。既定0=従来挙動と1ティックも不変。トレール極小幅の手法の約定依存度測定用(改善プラン T7) |
 | `python tools/atr_demo_deviation.py <journal>` | ライブジャーナルのSL/トレール決済 実約定 vs 期待値の乖離集計(中央値/p90)。atr_trend_scalpの実口座昇格判定用(改善プラン T8) |
 | `/bit-check` Skill | 完了ゲート(pytest全合格+depth50強いビット一致)のワンコマンド検証 |
 | `/annual-breakdown <report_dir>` Skill(`tools/annual_breakdown.py`) | レポートの年次分解+過剰適合警告(定石6) |
 | `/sweep` Skill(`tools/sweep.py`) | 手法非依存パラメータ・スイープ・ハーネス。ベースライン自己検証+年次分解強制+非単調振動(過剰適合疑い)の自動検出(改善プラン T9) |
+| `python tools/portfolio_correlation.py` | 手法間の日次損益相関+等倍単純合算ポートフォリオの合成DD・最悪同時損失日を算出(改善プラン T11) |
+| `python tools/daily_reconciliation.py <journal> --terminal-path <path>` | ジャーナルの退出イベント件数とMT5実約定履歴を突合し乖離を検出(表示のみ・自動修復なし。改善プラン T13 OPS-3) |
+| `scripts\register_watchdog_task.ps1`(ローカルのみ・gitignore対象) | PC再起動後の自動起動をWindowsタスクスケジューラへ登録(要手動実行・管理者権限。改善プラン T13 OPS-1) |
 
 - テストはCIで `pytest` 全件を必須とする。状態機械・注文ロジックの変更はプロパティテスト追加なしにマージしない。
 - ゴールデンリプレイ(同一入力→同一判断の回帰検証)は `tests/test_journal.py` でカバー。ルールゲート($0・決定論)のセッションについて、ジャーナルの特徴量スナップショットから判定が再現されることを検証する。

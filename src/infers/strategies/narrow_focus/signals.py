@@ -18,8 +18,8 @@ from datetime import datetime
 from decimal import Decimal
 
 from infers.ai.gateway import JudgementRequest
-from infers.analysis.dow import StructureEvent
-from infers.analysis.support_resistance import SRZone
+from infers.strategies.narrow_focus.dow import StructureEvent
+from infers.strategies.narrow_focus.support_resistance import SRZone
 
 
 @dataclass(frozen=True)

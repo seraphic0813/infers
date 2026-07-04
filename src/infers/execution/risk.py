@@ -100,6 +100,11 @@ class RiskManager:
         return self._kill_switch
 
     @property
+    def kill_reason(self) -> str:
+        """作動理由(未作動時は空文字列)。ダッシュボード等の読み取り専用表示向け。"""
+        return self._kill_reason
+
+    @property
     def daily_realized_tick_steps(self) -> int:
         return self._daily_realized_tick_steps
 

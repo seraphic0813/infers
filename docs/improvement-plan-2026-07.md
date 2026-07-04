@@ -178,8 +178,19 @@
 ### T13: 運用堅牢化(OPS-1〜3)
 - ① ウォッチドッグ(PC再起動後の自動起動。**キルスイッチ作動記録がある口座は自動起動しない**・PID個別管理)。② ハートビート(live→ジャーナル定期追記+ダッシュボード無音警告)。③ 日次リコンサイル(ジャーナル vs MT5 履歴の突合レポート。表示のみ・自動修復しない)。**工数**: 計3〜4日。
 
-### T14: `analysis/` の narrow_focus 移設
+### T14: `analysis/` の narrow_focus 移設 — ✅完了(2026-07-04)
 - `analysis/dow.py`・`support_resistance.py` を `strategies/narrow_focus/` へ git mv(ロジック不変)。旧パスは PEP 562 遅延 re-export。**完了条件**: 完了ゲート+L0/L1 で `from infers.analysis` が空。**依存**: T2。**工数**: 0.5〜1日。
+- **実績**: `git mv` で物理移設(内容無変更)。narrow_focus内の参照元(execution.py・provider.py・
+  signals.py・future_discretion.py)のimportを新パスへ更新。旧パス(`infers.analysis.dow`・
+  `.support_resistance`・`infers.analysis`本体)は`execution/sm.py`と同型のPEP 562
+  `__getattr__`遅延re-exportシムで互換維持(既存テストは旧パスのまま無改修で全合格)。
+  `grep "from infers.analysis"` はL0/L1(core/indicators/execution/backtest/data/ai/
+  dashboard)で空を確認。副次的発見: dow.py/support_resistance.pyは移設前から
+  `strategies.narrow_focus.zigzag.SwingPoint`を参照するL2依存を実際には抱えており
+  (phase2-architecture.md 2.0の既知境界違反が未解消のまま残っていた)、本移設で解消。
+  docs/phase2-architecture.md の該当節を「解消済み」に更新。
+  pytest 488件全合格 + depth50強いビット一致(PF1.487396352/624件/DD$325.77/
+  CACHE:GO=3124・NO_GO=1034、`/bit-check`で実測PASS確認)。
 
 ---
 

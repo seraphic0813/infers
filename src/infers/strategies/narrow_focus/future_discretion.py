@@ -26,7 +26,7 @@ from typing import Sequence
 
 from infers.indicators import Q, RsiState, rsi_forward
 from infers.strategies.narrow_focus.micro import RSI_OVERBOUGHT, RSI_OVERSOLD
-from infers.analysis.support_resistance import SRZone
+from infers.strategies.narrow_focus.support_resistance import SRZone
 
 # 戻り挟みパスの既定反発比率 (設計書 §5.3 パス族表)
 RETRACE_RATIO = Decimal("0.3")

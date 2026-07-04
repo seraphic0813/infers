@@ -114,3 +114,48 @@ narrow_focus・atr_trend_scalp の2手法を、別々のMT5デモ口座(別タ�
 - プロセスが理由不明に落ちることがある(過去に発生)。定期的に
   手順1のプロセス確認コマンドで生存をチェックし、落ちていたら本手順で
   再起動する。
+
+## 運用堅牢化(改善プラン T13、2026-07-04)
+
+### OPS-1: ウォッチドッグ(PC再起動後の自動起動)
+
+`scripts\start_live.ps1` は既に以下の安全弁を備えている:
+- 冪等(既に起動中の手法は自動でスキップ)
+- smc_bos は起動しない(ライブ凍結中)
+- **narrow_focus・atr_trend_scalp は、ジャーナルに `KILL_SWITCH_ENGAGED` イベントが
+  1件でも残っていれば自動起動しない**(`Test-KillSwitchEngaged` 関数)。キルスイッチは
+  プロセス再起動でメモリ上はリセットされるが、それは「なぜ作動したか」を人間が確認した
+  ことを意味しない。原因調査を経ずに自動再起動すると同じ事故を繰り返しかねないため、
+  **原因調査後に該当ジャーナルファイルをアーカイブ/リネームしてから手動で再起動する**運用とする。
+
+PC再起動後にこのスクリプトを自動実行させたい場合は `scripts\register_watchdog_task.ps1`
+(Windows タスクスケジューラへ「ログオン時に start_live.ps1 を実行」するタスク
+`INFERS-LiveWatchdog` を登録する)を**手動で実行**する(システム状態を変更するため
+自動実行はしない設計。要管理者権限)。解除は
+`Unregister-ScheduledTask -TaskName "INFERS-LiveWatchdog" -Confirm:$false`。
+
+### OPS-2: ハートビート(無音検知)
+
+各ライブプロセスは既定で5分ごとにジャーナルへ `HEARTBEAT` イベントを記録する
+(`LiveRunner` の `heartbeat_interval_s` 引数。既定300秒、0で無効)。確定足が長時間
+流れない(フィード無音)障害は、バー駆動の記録だけでは検知できない(バーが来ないこと
+自体が障害のため)。ハートビートはバーの到着に依存しない独立スレッドで駆動するため、
+この種の障害でも生存確認ができる。
+
+ダッシュボード(`python -m infers.dashboard`)は各ジャーナルの最終イベントからの
+経過時間(`silence_seconds`)を表示し、900秒(ハートビート既定間隔の3倍)を超えると
+赤字で「⚠ 無音 N分」と警告する(表示のみ・自動アクションなし)。
+
+### OPS-3: 日次リコンサイル(ジャーナル vs MT5実約定の突合)
+
+```
+python tools/daily_reconciliation.py work/journal/atr_trend_scalp_xauusd.jsonl \
+  --terminal-path "C:\Program Files\Vantage Trading MT5 Terminal3\terminal64.exe" \
+  --symbol XAUUSD --day 2026-07-04
+```
+
+ジャーナルの退出系FSMイベント(SL_HIT/TP_CLOSE/CLOSE_ALL)の件数と、MT5の実約定履歴
+(`history_deals_get`)の退出件数を突合し、乖離があれば警告する。**表示のみ・自動修復は
+しない**(smc_bos のファントム建玉事故のような「内部状態と実口座の乖離が長期間気づかれ
+なかった」問題の早期検知が目的)。日次でこのコマンドを実行する運用を推奨する
+(タスクスケジューラでの自動化は任意。本ツール自体は診断のみで発注APIに触れない)。

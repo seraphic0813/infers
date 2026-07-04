@@ -34,8 +34,8 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum, auto
 from typing import Callable
 
-from infers.analysis.dow import StructureEvent, StructureEventType, TrendState
-from infers.analysis.support_resistance import SRZone
+from infers.strategies.narrow_focus.dow import StructureEvent, StructureEventType, TrendState
+from infers.strategies.narrow_focus.support_resistance import SRZone
 from infers.core.execution import (
     BarOutcome, BrokerPort, SlMonotonicityError, TransitionError,
 )
