@@ -481,3 +481,33 @@ smc_bos単独の要因(2026-01-31、他2手法はその日無取引)であり、
 可能性(「平常時は無相関、ストレス時のみ相関1に近づく」金融市場の典型的パターン)は
 バックテストでは検出できない。口座横断モニタ(T12)による実運用時の合算エクスポージャー
 監視と併用すること。
+
+## narrow_focus_mtf(M1実測)(2026-07-04、改善プラン T16)
+
+Narrow Focus 手法のマルチTF変種(判定TFをM5→H1へ引き上げ)。詳細設計・採否基準・
+完全な実測記録は
+[strategies/narrow_focus/mtf-variant.md](../src/infers/strategies/narrow_focus/mtf-variant.md)
+§4 を参照。depth50 の確定フィルター構成(macro_wave2/depth_screen/depth_max=0.50/
+score_fib=False)をそのまま引き継ぎ、TF系のみ変更した単一変数実験。
+
+| 指標 | depth50(M5) | narrow_focus_mtf(H1・M1) |
+|---|---|---|
+| トレード数 | 624 | 80 |
+| PF | 1.487396352 | **0.670338236** |
+| 勝率 | 53.37% | 21.25% |
+| 最大DD | $325.77 | $573.60 |
+| 純益(5年) | +$1,444(概算) | **−$418.71** |
+| 売り比率 | 約84% | 86.25% |
+| トレードスパン中央値 | ≈1時間 | 10〜12時間 |
+
+年次分解では2021・2022・2025・2026年でPF<0.9のフロア割れ警告が発火(黒字は2023・2024年のみ)。
+**採否判定は Fable 5 が行う(本節は M1 実測記録のみ)。**
+
+再生成コマンド:
+```
+python tools/resample_parquet.py data/xauusd_m5.parquet data/xauusd_h1.parquet --tf H1
+python -m infers.main --mode backtest --data data/xauusd_h1.parquet --tf H1 --symbol XAUUSD \
+  --strategy narrow_focus_mtf --verdict-cache work/cache/verdicts_nfmtf.sqlite3 \
+  --report reports/narrow_focus_mtf_full
+python tools/annual_breakdown.py reports/narrow_focus_mtf_full
+```
