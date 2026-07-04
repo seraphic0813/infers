@@ -285,7 +285,7 @@ class BacktestEquityProvider:
 
 
 class BacktestEngine:
-    def __init__(self, *, broker: LedgerBroker, gateway: AiGateway,
+    def __init__(self, *, broker: LedgerBroker, gateway: "AiGateway | None",
                  risk: RiskManager, fsm_config: FsmConfig,
                  swap: SwapConfig | None = None,
                  volume_sizer: "VolumeSizer | None" = None,

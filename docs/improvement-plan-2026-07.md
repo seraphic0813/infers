@@ -196,9 +196,22 @@
 
 ## Phase 3: 構造課題と Agentic 化(Month 2〜)
 
-### T15: ゲートの手法宣言化(AI層ステップ2)【本プラン最難】
+### T15: ゲートの手法宣言化(AI層ステップ2)【本プラン最難】— ✅完了(2026-07-04)
 - `StrategySpec.gate`(既定 `None`)を追加。`None` の手法は TradingLoop がゲートを呼ばない。narrow_focus/depth50 は現行ルールゲートを宣言し、**呼び出し列・キャッシュキー・統計カウントを完全一致**させる。完了後、非NF手法の signals.py からプレースホルダ捏造フィールドを撤去。
 - **完了条件**: 完了ゲート(強い一致が核心)+ゴールデンリプレイ+非NF手法のトレード列がパススルー時と同一。失敗時は差し戻し。**依存**: T6。**工数**: 3〜5日。
+- **実績(設計=Fable 5[docs/t15-gate-declaration-design.md]/実装=Sonnet 5/レビュー=Fable 5)**:
+  `StrategySpec.gate`("rule"|None、既定None。narrow_focus/depth50のみ"rule")・
+  `TradingLoop(gateway=None)` 許容(on_candleの変更はNoneガード2箇所のみ、非None経路は
+  1バイト不変)・`resolve_ai_client`(明示CLI>手法宣言>レガシー既定"rule")を実装。
+  新規テスト20件(計508件全合格)。検証: ①depth50強いビット一致(PF1.487396352/624件/
+  CACHE:GO=3124・NO_GO=1034)実測PASS ②`--strategy depth50 --last 6m` 実装前後で
+  stdout**バイト一致** ③atr `--ai-client none`明示も**バイト一致**(後方互換)
+  ④atrフラグ無し(新経路=ゲート呼び出しなし)はトレード数59/PF/純益が完全一致・
+  ゲート統計行のみ非表示(意図された差)。プレースホルダ物理撤去は見送り
+  (`request`はレポートの特徴量スナップショット運搬役として意味が残る/
+  `cluster_score`等は`collect_judgements`汎用経路が参照するため。設計書§2.5の
+  スコープ限定どおり。L0がこれらを参照するのはゲートブロック内のみ→gate=Noneで
+  実行時参照ゼロ、が本質)。phase2 §段階2.5の既知課題を「縮退」で解消。
 
 ### T16: `narrow_focus_mtf` 変種(最重要の戦略実験)
 - depth50 を一切変更せず、H1 判定足+D1 マクロ(M5 内部リサンプル。`TfResampler` パターンを複製から開始)の新手法として実装・registry 新規登録。原典意図(90SMA=日足スケール・判定TF=H1)との対応表を spec.md に文書化。**採否基準(実装前に宣言)**: 全暦年 PF>1.2 かつ買い側黒字。M15 実験(PF0.778)の劣化前例があるため成績向上を前提にしない。

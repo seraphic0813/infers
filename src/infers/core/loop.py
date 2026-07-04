@@ -83,7 +83,7 @@ class JournalSink(Protocol):
 class TradingLoop:
     """ポジション群のオーケストレーション (モード非依存の中核)。"""
 
-    def __init__(self, *, broker: BrokerPort, gateway: AiGateway,
+    def __init__(self, *, broker: BrokerPort, gateway: "AiGateway | None",
                  risk: RiskManager, fsm_config: FsmConfig,
                  journal: "JournalSink | None" = None,
                  expiry_sink: "Callable[[str], None] | None" = None,
@@ -91,6 +91,9 @@ class TradingLoop:
                  equity_provider: "EquityProvider | None" = None,
                  execution_factory: "Callable[..., ExecutionModel] | None" = None) -> None:
         self._broker = broker
+        # エントリーゲート (T15: ゲートの手法宣言化)。None = 手法がゲート不要を
+        # 宣言 (StrategySpec.gate=None) — on_candle は judge を呼ばずプランを
+        # 無条件でリスク拒否権へ進める (常時GOのパススルーと構造的に等価)。
         self._gateway = gateway
         self._risk = risk
         self._fsm_cfg = fsm_config
@@ -155,7 +158,8 @@ class TradingLoop:
         elif bar_day != self._current_day:
             self._current_day = bar_day
             self._risk.new_day()
-            self._gateway.new_day()
+            if self._gateway is not None:
+                self._gateway.new_day()
 
         # 既存ポジションの管理 (決定論。AI/リスク層を一切経由しない)。執行モデル
         # 抽象 (ExecutionModel.on_bar) に委譲し、ループは手法固有の執行手順を知らない。
@@ -174,27 +178,34 @@ class TradingLoop:
         for plan in output.plans:
             if plan.plan_id in self.open_positions:
                 continue  # 冪等: 同一プランの再発行は無視 (二重建て防止)
-            verdict = self._gateway.judge(
-                plan.request,
-                cluster_score=plan.cluster_score, ambiguity=plan.ambiguity)
-            if self._journal is not None:
-                # 判断を特徴量スナップショットとともに記録 (CLAUDE.md 第11条)。
-                # 「ログに出してない判断」を作らない — GO/NO_GO いずれも残す。
-                self._journal.record("VERDICT", {
-                    "plan_id": plan.plan_id,
-                    "direction": plan.direction,
-                    "symbol": plan.request.symbol,
-                    "kind": plan.request.kind.value,
-                    "decision": verdict.decision,
-                    "source": verdict.source,
-                    "confidence": str(verdict.confidence),
-                    "reasons": list(verdict.reasons),
-                    "cluster_score": str(plan.cluster_score),
-                    "ambiguity": str(plan.ambiguity),
-                    "features": plan.request.features,
-                })
-            if verdict.decision != "GO":
-                continue
+            # エントリーゲート (T15: ゲートの手法宣言化)。手法が gate=None を宣言する
+            # 場合 (StrategySpec.gate) はこのブロック全体を丸ごとスキップし、プランは
+            # 無条件でリスク拒否権へ進む (常時GOのパススルーと構造的に等価。防御層=
+            # リスク拒否権・SL単調性・冪等IDは従来どおり全手法に強制)。
+            # gateway が None でない経路 (Narrow Focus) はこのブロックの内容・呼び出し
+            # 順序を1バイトも変えない。
+            if self._gateway is not None:
+                verdict = self._gateway.judge(
+                    plan.request,
+                    cluster_score=plan.cluster_score, ambiguity=plan.ambiguity)
+                if self._journal is not None:
+                    # 判断を特徴量スナップショットとともに記録 (CLAUDE.md 第11条)。
+                    # 「ログに出してない判断」を作らない — GO/NO_GO いずれも残す。
+                    self._journal.record("VERDICT", {
+                        "plan_id": plan.plan_id,
+                        "direction": plan.direction,
+                        "symbol": plan.request.symbol,
+                        "kind": plan.request.kind.value,
+                        "decision": verdict.decision,
+                        "source": verdict.source,
+                        "confidence": str(verdict.confidence),
+                        "reasons": list(verdict.reasons),
+                        "cluster_score": str(plan.cluster_score),
+                        "ambiguity": str(plan.ambiguity),
+                        "features": plan.request.features,
+                    })
+                if verdict.decision != "GO":
+                    continue
             # 可変ロットサイジング: EquityProvider + VolumeSizer が注入されている場合は
             # 残高 × risk_pct ÷ SL距離 で発注ステップ数を決定する。
             # 注入なし (省略時) は plan の固定値をそのまま使う (旧挙動・テスト互換)。

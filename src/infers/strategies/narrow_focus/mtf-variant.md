@@ -1,0 +1,134 @@
+# narrow_focus_mtf 設計書: マルチTF変種(判定足H1)
+
+> **ステータス: 設計確定・M1実装へ(2026-07-04、Fable 5)/ 実装: Sonnet 5 /
+> 採否判定: Fable 5** — 改善プラン [T16](../../../../docs/improvement-plan-2026-07.md)。
+> 本書は Narrow Focus 手法の**マルチTF変種**の設計と実測記録。depth50(v1.0基準実装)の
+> コード・挙動は**1ビットも変えない**(全変更は加算的)。
+
+---
+
+## 0. 背景 — なぜ作るか(最重要の戦略課題)
+
+手法原典([entry-methodology.md](entry-methodology.md)・設計書)はマルチタイム
+フレームを意図している: 判定TF=H1、マクロ(ダウ/エリオット)=D1/W1、90SMA=**日足**。
+しかし現実装(depth50)は**M5単一の判定足**であり:
+- 実測トレードスパン中央値≈1時間(手法の意図=数日〜数週間のスイングとは別物)
+- 「90SMA」= M5×90 = 7.5時間(手法の意図=90日)
+- depth50 のパラメータ空間は掘り尽くされ(macro_k較正・深さ緩和・M15化・建値距離、
+  すべて実測済み不採用)、残る改善は**構造**のみ
+
+**M15実験(PF0.778・不採用)の教訓**: TFだけ変えてパラメータを据え置くと劣化し得る。
+本変種も**成績向上を前提にしない**。目的は「原典意図に忠実な構成が5年データで
+何を出すか」を初めて実測すること。
+
+## 1. 事前宣言の採否基準(実装前に固定・事後変更禁止)
+
+- **採用**: 全暦年 PF > 1.2 **かつ** 買い側黒字(`/annual-breakdown` + 方向別集計)
+- **不採用**: 上記未達 → M15実験と同様「参考記録」としてレポート・本書に残し、
+  レジストリ登録は残置(コスト無し)、ライブ投入はしない
+- 判定は年次分解で行う(CLAUDE.md 定石6)。全期間1本のPFでは判定しない
+- パラメータ探索は M1 では行わない(素の構成の実力を測る)。探索する場合は
+  M2 として `/sweep`(年次分解強制・非単調検出つき)経由でのみ行う
+
+## 2. M1 設計(今回実装するスコープ): 純プリセット+H1データ
+
+**コード変更は「レジストリ1件+リサンプルツール1本」のみ。provider/execution は不変。**
+
+### 2.1 データ: M5→H1 の決定論リサンプル
+
+- 新ツール `tools/resample_parquet.py`: INFERS整数ティックparquet
+  (`time[UTC]/o_int/h_int/l_int/c_int/volume`、`data/exporter.py` 形式)を読み、
+  上位TFへバケット集約して同形式で書き出す。
+  - バケット境界 = `open_time` を対象TF長でUTC床丸め(H1なら毎正時)
+  - `o_int`=バケット先頭バーの o / `h_int`=max / `l_int`=min / `c_int`=末尾バーの c /
+    `volume`=合計 / `time`=バケット開始時刻
+  - 末尾の不完全バケットは**破棄**(確定足主義: 未完成の上位足を流さない)
+  - 週末ギャップはバケットが自然に空くだけ(穴埋め・合成はしない)
+  - M15実験(M5→M15集約)と同じ手続きの一般化。単一の真実=M5 parquet から派生させ、
+    別ソース(MT5のH1直接export)は使わない(phase2 §5「1ファイルを正」)
+- 生成: `python tools/resample_parquet.py data/xauusd_m5.parquet data/xauusd_h1.parquet --tf H1`
+- 参考: 354,393本(M5)→ 約29.5k本(H1)。バックテストは数十秒で回る見込み
+
+### 2.2 レジストリ: `narrow_focus_mtf` プリセット
+
+depth50 の確定フィルター構成を**そのまま**引き継ぎ、TF系のみ変える
+(単一変数実験 = TF構造の寄与を分離する):
+
+```python
+def _build_narrow_focus_mtf(*, symbol, tf):
+    # 判定TFはH1想定 (CLI で --tf H1 を明示。smc_bos の M30 と同じ規約)
+    cfg = ProviderConfig(
+        macro_wave2=True, depth_screen=True,
+        depth_max=Decimal("0.50"), score_fib=False,     # ← depth50 と同一
+        rsi_macro_tfs=(Timeframe.H4, Timeframe.D1),      # ← 変更 (下記)
+        # macro_tf=D1 (既定のまま: 方向は原典どおりD1)
+        # wave2_tf=H4 (既定のまま: H1判定 < H4押し目 < D1方向 の階層が成立)
+    )
+    return InfersSignalProvider(symbol=symbol, tf=tf, config=cfg)
+
+register(StrategySpec(
+    name="narrow_focus_mtf",
+    build=_build_narrow_focus_mtf,
+    description="Narrow Focus マルチTF変種 (判定H1/押し目H4/方向D1。depth50と同一フィルター構成のTF移植。実測実験)",
+    report_spec=NARROW_FOCUS_REPORT_SPEC,
+    gate="rule",       # T15 マージ後: 同じNF特徴量スキーマのためルールゲートが機能する
+))
+```
+
+**TF選定の根拠**:
+- `tf=H1`(判定): 原典意図(メモリ: decision_tf の例=H1)。
+- `macro_tf=D1`(方向): 原典「ダウ理論(D1/H1)で方向を確定」のD1。**既定のまま**。
+- `wave2_tf=H4`(押し目カウント): **既定のまま**。provider.py の設計注記
+  「方向はD1・押し目はやや細かい足(H4)。両者を同一TFにすると買いが消える論理矛盾」
+  に従い、H1判定でも `判定(H1) < 押し目(H4) < 方向(D1)` の階層が保たれる H4 を維持。
+- `rsi_macro_tfs=(H4, D1)`: 原典「RSIマルチTF(M5/H1/D1)」=判定TF+上位2段。判定が
+  H1 になったため、既定 `(H1, D1)` は判定TFと重複する。上位2段として `(H4, D1)` を
+  採用(代替 `(D1, W1)` は W1 RSI(14) のウォームアップに約15週を要し検証期間を
+  侵食するため M1 では見送り。M2 論点)。
+- 執行 = 既定 NarrowFocusExecution(`build_execution=None`)。FSM 設定も既定
+  (`min_be_distance=10 ticks` / `be_offset=2` / `breakout_buffer=10`)。
+  H1 のスイング幅に対しこれらの M5 較正値は相対的に極小となる可能性が高いが、
+  **M1 では意図的に据え置く**(M15実験がまさに「min_be_distance の極小性」を劣化
+  要因の仮説に挙げており、H1 でも同じ現象が出るかを素の構成で観測することに価値がある)。
+
+### 2.3 M1 の既知の忠実性ギャップ(仕様として明記)
+
+- **90/200SMA は判定TF(H1)上で計算される** = 90時間≈3.75営業日・200時間≈8.3営業日。
+  原典意図の「90**日**/200**日**」には M1 では届かない(M5 の 7.5時間よりは1桁近い)。
+  完全忠実化には SMA 系列だけ D1 で計算する `sma_tf` オプションが必要で、これは
+  provider 変更を伴うため **M2**(narrow_focus_mtf 専用パッケージに provider を複製して
+  改造。共有 provider は触らない — 改善プラン「複製から始める」原則)。
+- ニュース遮断(G3)は依然未実装(depth50 と同条件)。
+
+### 2.4 実測手順
+
+```
+python tools/resample_parquet.py data/xauusd_m5.parquet data/xauusd_h1.parquet --tf H1
+python -m infers.main --mode backtest --data data/xauusd_h1.parquet --tf H1 --symbol XAUUSD \
+  --strategy narrow_focus_mtf --verdict-cache work/cache/verdicts_nfmtf.sqlite3 \
+  --report reports/narrow_focus_mtf_full
+python tools/annual_breakdown.py reports/narrow_focus_mtf_full
+```
+
+記録項目(本書 §4 とレポートに追記): トレード数 / PF / 勝率 / 最大DD / 純益 /
+年次分解 / **買い・売り方向別の件数とPF**(売り84%偏重がTF構造の変更で変わるかが
+本実験の中心的観測点のひとつ)/ トレードスパン中央値。
+
+## 3. M2 候補(M1 の結果を見てから判断。今回は実装しない)
+
+- `sma_tf=D1`: 90/200SMA を日足系列で計算(provider 複製+改造)
+- `rsi_macro_tfs=(D1, W1)`: 原典の「1日+1週間」スケール
+- FSM 設定の H1 スケーリング(`min_be_distance` 等)— `/sweep` で事前宣言つき探索
+- いずれも M1 が「構造的に有望だが特定の歪みがある」ことを示した場合のみ
+
+## 4. 実測結果(M1)
+
+(実装後に追記)
+
+## 5. 検証(完了ゲート)
+
+1. **depth50 強いビット一致**(`/bit-check`)— 全変更が加算的であることの担保
+2. `pytest` 全合格(新規: リサンプルツールの単体テスト[バケット境界・不完全バケット破棄・
+   決定論性]+レジストリ配線テスト)
+3. CLI 完走: 上記 §2.4 のコマンドが完走しトレードが発生する
+4. 採否判定(§1 基準・Fable 5)を本書 §4 と reports/README.md に記録
