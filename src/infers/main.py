@@ -159,13 +159,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "フラグ(--depth-max 等)を無視し、レジストリ登録済みの構成を"
                         "そのまま使う。省略時は従来のフラグ組み立て経路(挙動不変)")
     p.add_argument("--verdict-cache", default="work/cache/verdicts.sqlite3")
-    p.add_argument("--ai-client", choices=["rule", "none"], default="rule",
-                   help="エントリーゲートの判定方式。既定は rule_judge.py の"
-                        "決定論ルール ($0, narrow_focus_v3.md §5 実装)。"
-                        "none は手法非依存のパススルー(常時GO。Narrow Focus 固有特徴量"
-                        "を前提としない別手法 — market_tpsl/smc_bos 等 — のバックテスト用。"
-                        "防御層は不変。spec.md §5.7 案A)。トレード判定にLLMは現在"
-                        "不使用のため LLM経由のゲートは選択肢に無い(CLAUDE.md A-12)")
+    p.add_argument("--ai-client", choices=["rule", "none"], default=None,
+                   help="エントリーゲートの判定方式。省略時は解決順序で決まる"
+                        "(resolve_ai_client: ①本フラグ明示 → ②--strategy のレジストリ"
+                        "宣言(StrategySpec.gate) → ③レガシー既定 'rule')。"
+                        "rule は rule_judge.py の決定論ルール ($0, narrow_focus_v3.md "
+                        "§5 実装)。none は手法非依存のパススルー(常時GO。Narrow Focus "
+                        "固有特徴量を前提としない別手法 — market_tpsl/smc_bos 等 — の"
+                        "バックテスト用。防御層は不変。spec.md §5.7 案A)。トレード判定に"
+                        "LLMは現在不使用のため LLM経由のゲートは選択肢に無い"
+                        "(CLAUDE.md A-12)")
     p.add_argument("--years", type=int, default=5, help="export: 取得年数")
     p.add_argument("--max-bars", type=int, help="live: 処理バー数上限 (検証用)")
     p.add_argument("--warm-bars", type=int, default=15000,
@@ -301,13 +304,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _build_gateway(args: argparse.Namespace) -> AiGateway:
+def resolve_ai_client(args: argparse.Namespace) -> str | None:
+    """エントリーゲート方式の解決 (T15: ゲートの手法宣言化)。
+
+    戻り値: "rule" | "none" | None (ゲートなし = TradingLoop はゲートを呼ばない)。
+
+    優先順位:
+      1. 明示された --ai-client (後方互換: 文書化済みコマンドの挙動を完全維持)
+      2. --strategy 指定時: レジストリの StrategySpec.gate 宣言
+         ("rule" → ルールゲート / None → ゲートなし)
+      3. レガシー経路 (--strategy 無し / --provider): "rule" (従来の既定)
+    """
+    if args.ai_client is not None:
+        return args.ai_client
+    if args.strategy:
+        from infers.strategies.registry import get_strategy
+        return get_strategy(args.strategy).gate
+    return "rule"
+
+
+def _build_gateway(args: argparse.Namespace) -> "AiGateway | None":
     """既定はルールベースゲート (rule_judge.py: narrow_focus_v3.md §5 の
     決定論実装、$0・同期呼び出し可)。`--ai-client none` は手法非依存のパススルー
     (spec.md §5.7 案A。market_tpsl/smc_bos 等、Narrow Focus 固有特徴量を
     前提としない手法のバックテスト用)。どちらも純粋関数的でLLMを呼ばない
-    ($0・例外なし。CLAUDE.md A-12: トレード判定にLLMは現在不使用)。"""
-    if args.ai_client == "none":
+    ($0・例外なし。CLAUDE.md A-12: トレード判定にLLMは現在不使用)。
+
+    解決結果 (resolve_ai_client) が None (手法がゲート不要を宣言) のときは
+    ゲートウェイ自体を構築せず None を返す (T15)。"""
+    resolved = resolve_ai_client(args)
+    if resolved is None:
+        return None
+    if resolved == "none":
         from infers.ai.passthrough import PASSTHROUGH_POLICY, PassthroughLlmClient
         client = PassthroughLlmClient()
         policy = PASSTHROUGH_POLICY
@@ -388,7 +416,10 @@ def run_backtest(args: argparse.Namespace) -> int:
     if args.report:
         from infers.backtest.report_html import BacktestRecorder, RecordingGateway
         from infers.core.report_spec import GENERIC_REPORT_SPEC
-        gateway = RecordingGateway(gateway)
+        # gateway=None (T15: 手法がゲート不要を宣言) のときは RecordingGateway で
+        # 包まない — BacktestRecorder.gateway は None 許容 (_verdict_dict が None を返す)。
+        if gateway is not None:
+            gateway = RecordingGateway(gateway)
         report_spec = resolve_report_spec(args) or GENERIC_REPORT_SPEC
         recorder = BacktestRecorder(gateway=gateway, report_spec=report_spec)
 
@@ -449,7 +480,8 @@ def run_backtest(args: argparse.Namespace) -> int:
     print(f"profit_factor={report.profit_factor}  win_rate={report.win_rate}")
     print(f"be_sl_exit_rate={report.be_sl_exit_rate}  "
           f"max_dd={report.max_drawdown_tick_steps}")
-    _print_gateway_stats(gateway)
+    if gateway is not None:
+        _print_gateway_stats(gateway)
 
     if args.report and recorder is not None:
         from infers.backtest.report_html import write_html_report
@@ -482,7 +514,7 @@ def _open_live_journal(args: argparse.Namespace):
         "mode": "live",
         "symbol": args.symbol,
         "tf": args.tf,
-        "ai_client": args.ai_client,
+        "ai_client": resolve_ai_client(args),
         "demo": bool(args.demo and not args.allow_real_account),
         "prompt_version": PROMPT_VERSION,
     })

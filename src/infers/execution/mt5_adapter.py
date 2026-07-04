@@ -413,7 +413,7 @@ class LiveRunner:
         tf: Timeframe,
         broker,                                   # BrokerPort
         provider: SignalProvider,
-        gateway: AiGateway,
+        gateway: "AiGateway | None",
         risk: RiskManager,
         fsm_config: FsmConfig,
         event_source: Callable[[Candle], list[BrokerEvent]] | None = None,

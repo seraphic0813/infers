@@ -36,6 +36,10 @@ class StrategySpec:
     # レポート表示記述子 (report_html.py)。None のとき main.py は手法非依存の
     # 汎用フォールバック(GENERIC_REPORT_SPEC)を使う。
     report_spec: "StrategyReportSpec | None" = None
+    # エントリーゲートの宣言 (T15: ゲートの手法宣言化)。None = ゲートなし
+    # (TradingLoop はゲートを呼ばない)。"rule" = rule_judge.py の決定論
+    # ルールゲート (verdict_cache 併用)。narrow_focus/depth50 のみ "rule"。
+    gate: "str | None" = None
 
 
 _REGISTRY: dict[str, StrategySpec] = {}
@@ -81,12 +85,14 @@ register(StrategySpec(
     build=_build_narrow_focus,
     description="Narrow Focus 分析パイプライン (ProviderConfig既定値。フラグ未指定時の従来挙動と同一)",
     report_spec=NARROW_FOCUS_REPORT_SPEC,
+    gate="rule",
 ))
 register(StrategySpec(
     name="depth50",
     build=_build_depth50,
     description="v1.0確定ベースライン (riskfix+40%深さスクリーニングを50%へ緩和)",
     report_spec=NARROW_FOCUS_REPORT_SPEC,
+    gate="rule",
 ))
 
 
