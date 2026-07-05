@@ -349,6 +349,27 @@ class TestAtrTrendScalpProvider:
         out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
         assert len(out.plans) == 1
 
+    def test_atr_floor_bps_blocks_low_relative_volatility(self):
+        # v1.2 ステージ③(相対ボラフロア): このシナリオの ATR/価格比は約775bps
+        # (atr≒87.98, c_int=1135)。閾値800にすると比が下回り遮断される。
+        p = make_provider(atr_floor_bps=Decimal("800"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert out.plans == []
+
+    def test_atr_floor_bps_below_threshold_does_not_block(self):
+        # 同じシナリオで閾値700(実比775bpsより低い)なら遮断されない。
+        p = make_provider(atr_floor_bps=Decimal("700"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+
+    def test_atr_floor_bps_off_by_default_does_not_block(self):
+        p = make_provider()   # atr_floor_bps 既定 0 = 無効
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+
     def test_suppresses_new_plan_while_position_open(self):
         p = make_provider()
         _warm_long_setup(p)
@@ -385,6 +406,8 @@ class TestAtrTrendScalpProvider:
             make_provider(vol_mult_max=Decimal("0.3"))
         with pytest.raises(ValueError):
             make_provider(range_atr_mult_max=Decimal("-1"))
+        with pytest.raises(ValueError):
+            make_provider(atr_floor_bps=Decimal("-1"))
 
 
 # ---------------------------------------------------------------------------
