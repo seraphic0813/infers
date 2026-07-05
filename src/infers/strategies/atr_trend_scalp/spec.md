@@ -133,10 +133,10 @@ IDLE ─place()─▶ OPEN(全玉・初期SL) ─TP1到達─▶ RUNNER(残玉�
 ```powershell
 # データ取得(M5・大容量。まず短期で検証)
 python -m infers.main --mode export --data data/xauusd_m5.parquet --tf M5 --symbol XAUUSD --years 2
-# バックテスト(パススルーゲート)
-python -m infers.main --mode backtest --data data/xauusd_m5.parquet --strategy atr_trend_scalp --tf M5 --symbol XAUUSD --ai-client none --report reports/atr_trend_scalp_full
+# バックテスト(パススルーゲート。--risk-pct 0.0003 は v1.2ステージ④採用の複利サイジング。§16)
+python -m infers.main --mode backtest --data data/xauusd_m5.parquet --strategy atr_trend_scalp --tf M5 --symbol XAUUSD --ai-client none --risk-pct 0.0003 --report reports/atr_trend_scalp_full
 # ライブ(別口座 = 別プロセス・別MT5ターミナル・別 --journal。デモ必須)
-python -m infers.main --mode live --demo --strategy atr_trend_scalp --tf M5 --symbol XAUUSD --ai-client none --journal work/journal/atr_xau.jsonl
+python -m infers.main --mode live --demo --strategy atr_trend_scalp --tf M5 --symbol XAUUSD --ai-client none --risk-pct 0.0003 --journal work/journal/atr_xau.jsonl
 ```
 
 ---
@@ -396,3 +396,42 @@ PFは2.0→6.0で単調増加(1.5507→1.5553→1.5743→1.6176→1.6279)、非�
 シグナル生成頻度としては v1.1 の約2/3)。ステージ④(`--risk-pct`複利実測)・
 ステージ⑤(段階トレール)はこの新ベースライン(`atr_floor_bps=5.0`込み)の上で
 実施する。
+
+---
+
+## 16. v1.2 ステージ④: `--risk-pct` 複利運用の実測(2026-07-05・**採用: `--risk-pct 0.0003`**)
+
+**目的**: 既存実装(`VolumeSizer` + `--risk-pct`)を本手法で初めて実測し、固定0.02ロット
+(`volume_steps=2`)との複利差・DD率差を確認する。**コード変更ゼロ**(CLI実測のみ)。
+ステージ③確定構成(`atr_floor_bps=5.0`込み)をベースに実施。詳細設計は
+[improvement-plan-v1.2.md](improvement-plan-v1.2.md) ステージ④節。
+
+**事前宣言基準**: (a) 最終資産が固定ロット構成を上回る (b) 最大DDの対資本比(%)が
+固定ロット構成の1.3倍以内 (c) 全暦年で年間netが赤字化しない。PFはロットサイズに
+(ほぼ)不変のため判定に使わない。
+
+**実測結果**(`--mode backtest --strategy atr_trend_scalp --ai-client none`、
+初期資金$10,000、5年フル。`reports/atr_trend_scalp_riskpct_{fixed,0003,0005,001}/`):
+
+| 構成 | 最終資産 | リターン | 最大DD対資本比 | 全暦年net |
+|---|---|---|---|---|
+| 固定ロット(基準) | $11,900.85 | +19.01% | 0.72% | 全年黒字 |
+| `--risk-pct 0.0003` | $11,955.65 | +19.56% | 0.72%(×1.00) | 全年黒字 |
+| `--risk-pct 0.0005` | $12,422.53 | +24.23% | 0.73%(×1.01) | 全年黒字 |
+| `--risk-pct 0.001` | $13,245.55 | +32.46% | 0.88%(×1.22) | 全年黒字 |
+
+**3水準すべてが基準(a)(b)(c)を満たした**(`/annual-breakdown`(`tools/annual_breakdown.py`)
+実行でも全構成・全暦年で警告なし)。事前宣言基準に同点時の選好が定義されていない
+ため、どの水準を運用既定にするかはバックテスト指標だけでは決まらないリスク選好の
+判断としてユーザーに確認し、**保守的な `0.0003`**(固定ロット構成とDD対資本比が
+ほぼ同一=×1.00で、複利の開始点として現行の固定2ステップにほぼ相当する基準点)を
+採用と確定した。
+
+**判定: 採用(`--risk-pct 0.0003`)**。運用既定コマンド(spec.md §5 CLI節)へ反映済み。
+`min_volume_steps` は既定2のまま(半玉分割の成立要件。変更なし)。実際のデモ稼働・
+実口座昇格判定は本書スコープ外(引き続き自己責任・デモ検証必須)。
+
+**留意**: `--risk-pct 0.0005`(DD比ほぼ不変でリターン+5.2pt)・`--risk-pct 0.001`
+(最大リターンだがDD比×1.22で基準の1.3倍に接近)も基準は満たしており、将来より
+積極的なサイジングへ変更する余地があることは記録として残す(単一の5年経路での
+実測であり、テールリスクを完全には捉えていない点に留意)。
