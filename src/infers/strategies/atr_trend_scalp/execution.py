@@ -6,7 +6,10 @@
   - place(): 成行で全玉参入し、初期SL(= entry ∓ 1.0×ATR)を発注時に設定する。
   - on_bar(): 確定足ごとに
       OPEN   → 高値(買)/安値(売)が TP1 到達 → 半玉を利確 + 残玉SLを建値へ前進 → RUNNER
-      RUNNER → 0.5×ATR トレール(利益方向のみ)+ TP2 到達で残玉全決済 → CLOSED
+      RUNNER → トレール(利益方向のみ。v1.2ステージ⑤-Aで含み益が
+               trail_stage2_trigger に到達すると trail_stage2_distance へ幅を
+               切り替えるラッチ式2段トレールに対応。既定は単一幅=無効。spec.md §17)
+               + TP2 到達で残玉全決済 → CLOSED
   - on_broker_event(): ブローカーのSLヒットで CLOSED(初期SL/建値/トレールいずれでも)。
   - close(): 残玉を成行手仕舞い(データ末尾・シャットダウン)。
 
@@ -64,6 +67,10 @@ class AtrTrendExecution:
         self._entry_int: int | None = None
         self._volume_steps = 0
         self._half_steps = 0
+        # v1.2 ステージ⑤-A: 段階式トレール(既定0=無効。spec.md §17)。
+        self._stage2_trigger = 0
+        self._stage2_distance = 0
+        self._stage2_active = False
         self.journal: list[tuple[str, dict]] = []
         self.plan: object | None = None
 
@@ -148,6 +155,8 @@ class AtrTrendExecution:
         self._tp1_int = intent.tp1_int
         self._tp2_int = intent.fib_target_int
         self._trail_distance = intent.trail_distance_ticks
+        self._stage2_trigger = getattr(intent, "trail_stage2_trigger_int", 0)
+        self._stage2_distance = getattr(intent, "trail_stage2_distance_ticks", 0)
         self.plan = intent
         fill = self._broker.place_market(
             client_order_id=self._oid("mkt_entry"), position_id=self.position_id,
@@ -188,10 +197,22 @@ class AtrTrendExecution:
                     if self._entry_int is not None:
                         self._advance_sl_to(self._entry_int)   # 建値化(利益方向のみ)
 
-            # RUNNER: 0.5×ATR トレール(利益方向のみ)→ TP2 到達で残玉全決済。
+            # RUNNER: トレール(利益方向のみ)→ TP2 到達で残玉全決済。
+            # v1.2 ステージ⑤-A: 含み益が trail_stage2_trigger に到達したらトレール幅を
+            # trail_stage2_distance へ切り替える(ラッチ。一度入ったら戻らない)。
             if self._state is AtrState.RUNNER:
                 assert self._tp2_int is not None and self._trail_distance is not None
-                self._advance_sl_to(touch - self.direction * self._trail_distance)
+                trail = self._trail_distance
+                if (self._stage2_trigger > 0 and not self._stage2_active
+                        and self._entry_int is not None
+                        and self._profit_side(
+                            touch, self._entry_int + self.direction * self._stage2_trigger) >= 0):
+                    self._stage2_active = True
+                    self._log("TRAIL_STAGE2", trigger=self._stage2_trigger,
+                              width=self._stage2_distance)
+                if self._stage2_active:
+                    trail = self._stage2_distance
+                self._advance_sl_to(touch - self.direction * trail)
                 if self._profit_side(touch, self._tp2_int) >= 0:
                     self._broker.close_volume(
                         client_order_id=self._oid("tp2_close"),
