@@ -364,8 +364,12 @@ class TestAtrTrendScalpProvider:
         out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
         assert len(out.plans) == 1
 
-    def test_atr_floor_bps_off_by_default_does_not_block(self):
-        p = make_provider()   # atr_floor_bps 既定 0 = 無効
+    def test_atr_floor_bps_explicit_zero_disables(self):
+        # v1.2 ステージ③採用により既定値は5.0(spec.md §15)。明示的に0を渡せば
+        # 無効化されることを確認する(このシナリオの実比775bpsは既定5.0では
+        # 遮断されないほど大きいため、既定値のままでも本テストの意図は成立するが、
+        # 「0で無効化できる」契約自体を明示的に検証する)。
+        p = make_provider(atr_floor_bps=Decimal("0"))
         _warm_long_setup(p)
         out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
         assert len(out.plans) == 1

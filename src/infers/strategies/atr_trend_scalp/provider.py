@@ -16,6 +16,8 @@
 vol_mult=1.6 / tp1_atr_mult=0.5 / tp2_atr_mult=3.0 / trail_atr_mult=0.15。
 XAUUSD M5・5年の全期間バックテストで PF1.55・全暦年 PF>1.35・DD$71 を得た構成
 (根幹=4条件・50/50分割・建値化+トレールは不変。数値パラメータのみの調整)。
+v1.2 ステージ③(spec.md §15)で atr_floor_bps=5.0(相対ボラフロア。ATR/価格比が
+低い足を見送る)を追加採用し、PF1.618・全暦年PF>1.30・DD$72.46 へ更新。
 
 出口ジオメトリ(初期SL・TP1・TP2・トレール幅)はエントリー時ATRから確定させ
 `AtrTrendPlan` に載せる(spec.md §3・§4)。半玉数はプランに焼き込まず、可変ロット
@@ -78,7 +80,7 @@ class AtrTrendScalpProvider:
                  volume_steps: int = 2,
                  vol_mult_max: Decimal = Decimal("0"),
                  range_atr_mult_max: Decimal = Decimal("0"),
-                 atr_floor_bps: Decimal = Decimal("0"),
+                 atr_floor_bps: Decimal = Decimal("5.0"),
                  session_filter: bool = False,
                  session_start_hour_utc: int = 7,   # JST16:00 = UTC07:00
                  session_end_hour_utc: int = 16,    # JST25:00(翌01:00) = UTC16:00
