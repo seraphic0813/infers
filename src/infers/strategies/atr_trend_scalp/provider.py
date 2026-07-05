@@ -24,10 +24,14 @@ v1.2 ステージ③(spec.md §15)で atr_floor_bps=5.0(相対ボラフロア。
 (`--risk-pct`)対応のため `AtrTrendExecution` が place() 時点の実 volume から導出する。
 
 単一ポジション制約は smc_bos と同じ「自己申告ミラー」で近似する(プラットフォームの
-SignalProvider は実際の約定・決済結果を通知しないため)。分割決済(TP1半利+トレール)
-の厳密な建玉状態はミラーでは追えないため、初期SL/TP2 到達で概算的にフラットへ戻す
-保守的近似とする(真の建玉管理は `AtrTrendExecution` が担う)。`reset_position_mirror()`
-はライブ起動時のウォームアップ(発注しない歴史データ素通し)後にミラーを戻す汎用フック。
+SignalProvider は実際の約定・決済結果を通知しないため)。`_PositionMirror` は
+`AtrTrendExecution` の分割決済FSM(TP1到達で建値化しRUNNERへ、以後トレールSL前進、
+TP2到達で全決済)をブローカーと結線せず価格のみで独立に再現する(真の建玉管理は
+`AtrTrendExecution` が担う。本ミラーは新規プラン抑制の判定材料に過ぎない)。実約定
+(スプレッド分のずれ)は無視した概算のため僅かな乖離はあり得るが、初期SL/TP2の固定値
+到達のみで判定していた旧実装と異なり、建値化・トレールでSLが前進した後の決済も追跡
+する。`reset_position_mirror()` はライブ起動時のウォームアップ(発注しない歴史データ
+素通し)後にミラーを戻す汎用フック。
 """
 
 from __future__ import annotations
@@ -46,19 +50,60 @@ _FAR_FUTURE = datetime(2999, 1, 1, tzinfo=timezone.utc)
 
 
 class _PositionMirror:
-    """建玉中の新規プランを抑制する最小ミラー(初期SL/TP2 の固定値到達で判定)。"""
+    """建玉中の新規プランを抑制するミラー(`AtrTrendExecution` の分割決済FSMを
 
-    __slots__ = ("direction", "sl_int", "tp_int")
+    ブローカーと結線せず独立に再現する近似)。
 
-    def __init__(self, direction: int, sl_int: int, tp_int: int) -> None:
+    `AtrTrendExecution.on_bar` と同じ規則(TP1到達で建値化しRUNNERへ、以後は
+    トレールSL前進、TP2到達で全決済)を、プロバイダが受け取るのと同一の確定足
+    系列に対して価格のみで追跡する。判定順序も `engine.py` と同じく「このバーの
+    SL到達判定(前バー終端のSL値)→ TP1/トレール/TP2」に揃える(SL_HITは
+    `on_broker_event` が `on_bar` より先に配送されるため、実執行でも同一バー内で
+    SLが優先する)。実約定(スプレッド分のずれ)は無視した概算(建値=エントリー
+    参考価格のまま)であり、半玉数量は追跡しない(状態遷移そのものは数量に依らない
+    ため、フラット判定には不要)。
+    """
+
+    __slots__ = ("direction", "entry_int", "sl_int", "tp1_int", "tp2_int",
+                 "trail_distance", "runner")
+
+    def __init__(self, *, direction: int, entry_int: int, sl_int: int,
+                 tp1_int: int, tp2_int: int, trail_distance: int) -> None:
         self.direction = direction
+        self.entry_int = entry_int
         self.sl_int = sl_int
-        self.tp_int = tp_int
+        self.tp1_int = tp1_int
+        self.tp2_int = tp2_int
+        self.trail_distance = trail_distance
+        self.runner = False   # TP1到達後(建値化・トレール中)か
+
+    def _profit_side(self, a: int, b: int) -> int:
+        return self.direction * (a - b)
+
+    def _advance_sl(self, target: int) -> None:
+        if self._profit_side(target, self.sl_int) > 0:
+            self.sl_int = target
 
     def touched_exit(self, candle: Candle) -> bool:
-        if self.direction > 0:
-            return candle.h_int >= self.tp_int or candle.l_int <= self.sl_int
-        return candle.l_int <= self.tp_int or candle.h_int >= self.sl_int
+        """この確定足で建玉が完全にフラットへ戻るなら True(ミラー解除)。"""
+        touch = candle.h_int if self.direction > 0 else candle.l_int
+        sl_touch = candle.l_int if self.direction > 0 else candle.h_int
+
+        # 1) SL到達(前バー終端のSL値。建値化・トレール後のSLも対象)。
+        if self._profit_side(self.sl_int, sl_touch) >= 0:
+            return True
+
+        # 2) TP1到達 → 建値化 + RUNNER化(初回のみ)。
+        if not self.runner and self._profit_side(touch, self.tp1_int) >= 0:
+            self.runner = True
+            self._advance_sl(self.entry_int)
+
+        # 3) RUNNER: トレール前進 + TP2到達で全決済。
+        if self.runner:
+            self._advance_sl(touch - self.direction * self.trail_distance)
+            if self._profit_side(touch, self.tp2_int) >= 0:
+                return True
+        return False
 
 
 class AtrTrendScalpProvider:
@@ -289,5 +334,7 @@ class AtrTrendScalpProvider:
             request=request, cluster_score=Decimal(3), ambiguity=Decimal(0),
             trail_stage2_trigger_int=stage2_trigger,
             trail_stage2_distance_ticks=stage2_distance))
-        self._position = _PositionMirror(direction=direction, sl_int=sl, tp_int=tp2)
+        self._position = _PositionMirror(
+            direction=direction, entry_int=entry, sl_int=sl,
+            tp1_int=tp1, tp2_int=tp2, trail_distance=trail)
         return out
