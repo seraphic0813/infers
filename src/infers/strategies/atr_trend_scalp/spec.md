@@ -19,8 +19,9 @@
 - **何を足すか**: XAU/USD の M5 トレンドフォロー・スキャルピング。M15 の EMA50 を上位足
   バイアスに、M5 の EMA9/21 ゴールデン/デッドクロス + EMA21 押し目 + ATR/出来高フィルタ
   で成行参入する。高ボラティリティ環境適応型のトレンドフォロー。
-- **執行の核**: 50/50分割。**TP1(1.0×ATR)で半玉利確 + 残玉SLを建値へ移動 → RUNNER**、
-  残玉は **0.5×ATR トレーリング + TP2(2.0×ATR)** で手仕舞い。
+- **執行の核**: 50/50分割。**TP1(0.5×ATR)で半玉利確 + 残玉SLを建値へ移動 → RUNNER**、
+  残玉は **0.15×ATR トレーリング + TP2(3.0×ATR)** で手仕舞い(v1.1確定値。§12)。
+  v1.2ではさらに**相対ボラフロア(`atr_floor_bps=5.0`)**を追加採用(§15)。
 - **実装**: `strategies/atr_trend_scalp/`(`resample.py`=M5→M15 / `provider.py`=4条件ゲート /
   `execution.py`=`AtrTrendExecution` FSM / `signals.py`=`AtrTrendPlan`/`AtrTrendOutput` /
   `report.py`)+ レジストリ1件登録。**L0/L1 への新規追加は不要**(M5/M15/EMA/ATR/SMA は既存)。
@@ -161,6 +162,7 @@ python -m infers.main --mode live --demo --strategy atr_trend_scalp --tf M5 --sy
 | `vol_mult_max` | **0(無効)** | 出来高スパイク上限(v1.2ステージ①・不採用。§13) |
 | `range_atr_mult_max` | **0(無効)** | レンジ/ATR比上限(v1.2ステージ①・不採用。§13) |
 | `atr_floor_bps` | **5.0** | 相対ボラフロア(ATR/価格比。v1.2ステージ③で採用。§15) |
+| `trail_stage2_trigger_atr_mult` / `trail_stage2_atr_mult` | **0(無効)** / **0** | 段階式トレールの切替トリガー/幅(v1.2ステージ⑤-A・不採用。§17) |
 | `max_spread`(RiskManager) | 既存 | スプレッド異常拒否(金はスプレッド影響大) |
 
 ---
@@ -197,6 +199,7 @@ python -m infers.main --mode live --demo --strategy atr_trend_scalp --tf M5 --sy
 | **A4** | XAUUSD M5 データ export → 全期間バックテスト → `reports/atr_trend_scalp_full/`。出来高フィルタ実効性・含み益トリガーの損益寄与を分析 | ✅ 完了(v1.0: PF1.173) |
 | **A5(opt-in)** | `session_filter` の ON/OFF 実測比較 | ✅ 実測: ON は PF 低下のため不採用(§12) |
 | **v1.1** | パラメータPDCAで PF1.5以上を達成(根幹不変・数値のみ) | ✅ 完了(§12。PF1.55) |
+| **v1.2** | 改善5案を事前宣言基準+年次分解で直列検証(根幹不変・数値のみ) | ✅ 完了(§13〜17。PF1.618) |
 
 ---
 
@@ -252,6 +255,11 @@ v1.0既定で PF1.173164608・6,656トレード・DD25,783 を**ビット一致�
 `reports/atr_trend_scalp_full/health_check.md`「デモ約定検証ツール + 実口座昇格基準」節)。
 **実際のデモ2週間稼働・乖離実測はこれから**(運用作業)。
 6. **複利/実口座**: 本書スコープ外(デモ検証必須・自己責任)。
+
+> **v1.2 の調整履歴は §13〜17**(2026-07-05・5ステージ完了。採用: ③相対ボラフロア
+> `atr_floor_bps=5.0`・④risk-pct複利運用`--risk-pct 0.0003`。不採用: ①スパイク足
+> フィルター・②TP2拡張・⑤-A段階トレール)。最終確定構成のサマリ・年次分解・
+> スリッページ再検証は `reports/atr_trend_scalp_full/health_check.md`「v1.2 改善計画」節。
 
 ---
 
