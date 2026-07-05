@@ -318,6 +318,37 @@ class TestAtrTrendScalpProvider:
         out = p.on_candle(mk5(9, 1140, 1130, 1135, vol=100))
         assert out.plans == []
 
+    def test_vol_mult_max_blocks_spike_volume(self):
+        # v1.2 ステージ①(スパイク足フィルター案1): 既定OFFでは出るプランが
+        # vol_mult_max 設定時に出来高スパイク足として遮断されること。
+        # vol_sma は当足も window に含む(SMA.update が現在値ごと平均を返す)ため、
+        # vol_sma_period=5 にして直近5本(100,100,100,100,500)の平均=180で検証する
+        # (閾値 = 2.5 * 180 = 450 < 500)。
+        p = make_provider(vol_mult_max=Decimal("2.5"), vol_sma_period=5)
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=500))
+        assert out.plans == []
+
+    def test_vol_mult_max_off_by_default_does_not_block(self):
+        p = make_provider()   # vol_mult_max 既定 0 = 無効
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=300))
+        assert len(out.plans) == 1
+
+    def test_range_atr_mult_max_blocks_wide_range(self):
+        # v1.2 ステージ①(スパイク足フィルター案2): レンジが ATR の倍数を超える
+        # 足(このシナリオでは range=160, atr≒87.98 → 比≒1.82)は遮断される。
+        p = make_provider(range_atr_mult_max=Decimal("1.5"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert out.plans == []
+
+    def test_range_atr_mult_max_off_by_default_does_not_block(self):
+        p = make_provider()   # range_atr_mult_max 既定 0 = 無効
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+
     def test_suppresses_new_plan_while_position_open(self):
         p = make_provider()
         _warm_long_setup(p)
@@ -349,6 +380,11 @@ class TestAtrTrendScalpProvider:
             make_provider(volume_steps=0)
         with pytest.raises(ValueError):
             make_provider(tp1_atr_mult=Decimal(3), tp2_atr_mult=Decimal(2))
+        with pytest.raises(ValueError):
+            # vol_mult_max は 0 か vol_mult(既定0.5)より大きい必要がある。
+            make_provider(vol_mult_max=Decimal("0.3"))
+        with pytest.raises(ValueError):
+            make_provider(range_atr_mult_max=Decimal("-1"))
 
 
 # ---------------------------------------------------------------------------

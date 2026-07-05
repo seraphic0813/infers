@@ -76,6 +76,8 @@ class AtrTrendScalpProvider:
                  trail_atr_mult: Decimal = Decimal("0.15"),
                  min_stop_distance_ticks: int = 5,
                  volume_steps: int = 2,
+                 vol_mult_max: Decimal = Decimal("0"),
+                 range_atr_mult_max: Decimal = Decimal("0"),
                  session_filter: bool = False,
                  session_start_hour_utc: int = 7,   # JST16:00 = UTC07:00
                  session_end_hour_utc: int = 16,    # JST25:00(翌01:00) = UTC16:00
@@ -91,6 +93,10 @@ class AtrTrendScalpProvider:
         for m in (atr_vol_mult, vol_mult, sl_atr_mult, trail_atr_mult):
             if m <= 0:
                 raise ValueError("multipliers must be > 0")
+        if vol_mult_max != 0 and vol_mult_max <= vol_mult:
+            raise ValueError("vol_mult_max must be 0 (disabled) or > vol_mult")
+        if range_atr_mult_max < 0:
+            raise ValueError("range_atr_mult_max must be >= 0")
         if session_filter and not (0 <= session_start_hour_utc < session_end_hour_utc <= 24):
             raise ValueError("require 0 <= session_start < session_end <= 24 (no wrap)")
 
@@ -120,6 +126,8 @@ class AtrTrendScalpProvider:
         self._trail_atr_mult = trail_atr_mult
         self._min_stop_distance_ticks = min_stop_distance_ticks
         self._volume_steps = volume_steps
+        self._vol_mult_max = vol_mult_max
+        self._range_atr_mult_max = range_atr_mult_max
         self._session_filter = session_filter
         self._session_start = session_start_hour_utc
         self._session_end = session_end_hour_utc
@@ -208,6 +216,12 @@ class AtrTrendScalpProvider:
         if atr_val < self._atr_vol_mult * avg_atr:
             return out
         if Decimal(candle.volume) < self._vol_mult * vol_sma:
+            return out
+        # スパイク足フィルター(v1.2 ステージ①・既定OFF)。
+        if self._vol_mult_max != 0 and Decimal(candle.volume) > self._vol_mult_max * vol_sma:
+            return out
+        if (self._range_atr_mult_max != 0
+                and Decimal(candle.h_int - candle.l_int) > self._range_atr_mult_max * atr_val):
             return out
 
         # 出口ジオメトリ(エントリー時ATR固定)。
