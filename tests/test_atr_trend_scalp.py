@@ -349,6 +349,31 @@ class TestAtrTrendScalpProvider:
         out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
         assert len(out.plans) == 1
 
+    def test_atr_floor_bps_blocks_low_relative_volatility(self):
+        # v1.2 ステージ③(相対ボラフロア): このシナリオの ATR/価格比は約775bps
+        # (atr≒87.98, c_int=1135)。閾値800にすると比が下回り遮断される。
+        p = make_provider(atr_floor_bps=Decimal("800"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert out.plans == []
+
+    def test_atr_floor_bps_below_threshold_does_not_block(self):
+        # 同じシナリオで閾値700(実比775bpsより低い)なら遮断されない。
+        p = make_provider(atr_floor_bps=Decimal("700"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+
+    def test_atr_floor_bps_explicit_zero_disables(self):
+        # v1.2 ステージ③採用により既定値は5.0(spec.md §15)。明示的に0を渡せば
+        # 無効化されることを確認する(このシナリオの実比775bpsは既定5.0では
+        # 遮断されないほど大きいため、既定値のままでも本テストの意図は成立するが、
+        # 「0で無効化できる」契約自体を明示的に検証する)。
+        p = make_provider(atr_floor_bps=Decimal("0"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+
     def test_suppresses_new_plan_while_position_open(self):
         p = make_provider()
         _warm_long_setup(p)
@@ -385,6 +410,8 @@ class TestAtrTrendScalpProvider:
             make_provider(vol_mult_max=Decimal("0.3"))
         with pytest.raises(ValueError):
             make_provider(range_atr_mult_max=Decimal("-1"))
+        with pytest.raises(ValueError):
+            make_provider(atr_floor_bps=Decimal("-1"))
 
 
 # ---------------------------------------------------------------------------

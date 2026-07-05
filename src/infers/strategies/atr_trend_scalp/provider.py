@@ -16,6 +16,8 @@
 vol_mult=1.6 / tp1_atr_mult=0.5 / tp2_atr_mult=3.0 / trail_atr_mult=0.15。
 XAUUSD M5・5年の全期間バックテストで PF1.55・全暦年 PF>1.35・DD$71 を得た構成
 (根幹=4条件・50/50分割・建値化+トレールは不変。数値パラメータのみの調整)。
+v1.2 ステージ③(spec.md §15)で atr_floor_bps=5.0(相対ボラフロア。ATR/価格比が
+低い足を見送る)を追加採用し、PF1.618・全暦年PF>1.30・DD$72.46 へ更新。
 
 出口ジオメトリ(初期SL・TP1・TP2・トレール幅)はエントリー時ATRから確定させ
 `AtrTrendPlan` に載せる(spec.md §3・§4)。半玉数はプランに焼き込まず、可変ロット
@@ -78,6 +80,7 @@ class AtrTrendScalpProvider:
                  volume_steps: int = 2,
                  vol_mult_max: Decimal = Decimal("0"),
                  range_atr_mult_max: Decimal = Decimal("0"),
+                 atr_floor_bps: Decimal = Decimal("5.0"),
                  session_filter: bool = False,
                  session_start_hour_utc: int = 7,   # JST16:00 = UTC07:00
                  session_end_hour_utc: int = 16,    # JST25:00(翌01:00) = UTC16:00
@@ -97,6 +100,8 @@ class AtrTrendScalpProvider:
             raise ValueError("vol_mult_max must be 0 (disabled) or > vol_mult")
         if range_atr_mult_max < 0:
             raise ValueError("range_atr_mult_max must be >= 0")
+        if atr_floor_bps < 0:
+            raise ValueError("atr_floor_bps must be >= 0")
         if session_filter and not (0 <= session_start_hour_utc < session_end_hour_utc <= 24):
             raise ValueError("require 0 <= session_start < session_end <= 24 (no wrap)")
 
@@ -128,6 +133,7 @@ class AtrTrendScalpProvider:
         self._volume_steps = volume_steps
         self._vol_mult_max = vol_mult_max
         self._range_atr_mult_max = range_atr_mult_max
+        self._atr_floor_bps = atr_floor_bps
         self._session_filter = session_filter
         self._session_start = session_start_hour_utc
         self._session_end = session_end_hour_utc
@@ -214,6 +220,11 @@ class AtrTrendScalpProvider:
         # 条件4(ボラ&出来高フィルタ)。
         avg_atr = sum(self._atr_window, Decimal(0)) / self._atr_avg_period
         if atr_val < self._atr_vol_mult * avg_atr:
+            return out
+        # 相対ボラフロア(v1.2 ステージ③・既定OFF。価格比bpsで判定し年による
+        # 価格水準変化の影響を受けない)。
+        if (self._atr_floor_bps != 0
+                and atr_val * Decimal(10000) < self._atr_floor_bps * Decimal(candle.c_int)):
             return out
         if Decimal(candle.volume) < self._vol_mult * vol_sma:
             return out
