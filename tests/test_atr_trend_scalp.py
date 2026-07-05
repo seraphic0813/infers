@@ -95,6 +95,13 @@ class _ShortIntent:
     volume_steps = 2
 
 
+class _LongIntentStage2(_LongIntent):
+    # v1.2 ステージ⑤-A: TP2 を遠くへ(1200)し、トレールのみで検証できるようにする。
+    fib_target_int = 1200
+    trail_stage2_trigger_int = 30    # 含み益が entry+30 に到達でステージ2へ
+    trail_stage2_distance_ticks = 25  # ステージ1(10)より広い
+
+
 class TestAtrTrendExecution:
     def _broker(self) -> SimBroker:
         b = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)
@@ -214,6 +221,61 @@ class TestAtrTrendExecution:
         with pytest.raises(ValueError):
             AtrTrendExecution(position_id="e10", direction=0, broker=self._broker())
 
+    # -- v1.2 ステージ⑤-A: 段階式トレール ------------------------------------------
+
+    def test_stage2_trail_uses_wider_width_after_trigger(self):
+        broker = self._broker()
+        ex = AtrTrendExecution(position_id="e11", direction=+1, broker=broker)
+        ex.place(_LongIntentStage2())
+
+        b1 = mk5(1, 1025, 1010, 1022)   # TP1到達→RUNNER・建値化・トレール(幅10)
+        broker.process_bar(b1)
+        ex.on_bar(b1, None)
+        assert ex.state is AtrState.RUNNER
+        assert ex.sl_int == 1015                       # 1025 - 10(ステージ1幅)
+        assert all(n != "TRAIL_STAGE2" for n, _ in ex.journal)   # まだ未到達(<1032)
+
+        b2 = mk5(2, 1033, 1020, 1030)   # 含み益 entry(1002)+30=1032 に到達 → ステージ2発動
+        broker.process_bar(b2)
+        ex.on_bar(b2, None)
+        assert any(n == "TRAIL_STAGE2" for n, _ in ex.journal)
+        assert ex.sl_int == 1015        # 幅25の目標(1033-25=1008)は現SLより手前 → no-op
+
+        b3 = mk5(3, 1060, 1050, 1055)   # ステージ2幅(25)でのトレール前進を確認
+        broker.process_bar(b3)
+        ex.on_bar(b3, None)
+        assert ex.sl_int == 1035        # 1060 - 25(ステージ2幅)。幅10なら1050になるはず
+
+    def test_stage2_trail_latches_and_does_not_revert(self):
+        broker = self._broker()
+        ex = AtrTrendExecution(position_id="e12", direction=+1, broker=broker)
+        ex.place(_LongIntentStage2())
+
+        for bar in (mk5(1, 1025, 1010, 1022),   # RUNNER化・幅10
+                    mk5(2, 1033, 1020, 1030),    # ステージ2発動(no-op)
+                    mk5(3, 1060, 1050, 1055)):   # 幅25で前進 → sl=1035
+            broker.process_bar(bar)
+            ex.on_bar(bar, None)
+        assert ex.sl_int == 1035
+
+        # 押し目(高値1050): 幅10へ戻っていれば 1050-10=1040 > 1035 で前進するはずだが、
+        # ラッチにより幅25のまま(1050-25=1025 <= 1035)で no-op のはず。
+        b4 = mk5(4, 1050, 1010, 1030)
+        broker.process_bar(b4)
+        ex.on_bar(b4, None)
+        assert ex.sl_int == 1035   # 幅10へ戻っていれば1040になってしまう(ラッチ違反)
+
+    def test_stage2_trail_off_by_default_matches_v11(self):
+        # trail_stage2_trigger_int=0(既定)なら単一幅トレールのまま(v1.1挙動不変)。
+        broker = self._broker()
+        ex = AtrTrendExecution(position_id="e13", direction=+1, broker=broker)
+        ex.place(_LongIntent())
+        b1 = mk5(1, 1025, 1010, 1022)
+        broker.process_bar(b1)
+        ex.on_bar(b1, None)
+        assert ex.sl_int == 1015
+        assert all(n != "TRAIL_STAGE2" for n, _ in ex.journal)
+
 
 @pytest.mark.property
 @settings(max_examples=200, deadline=None)
@@ -242,6 +304,47 @@ def test_advance_sl_to_never_retreats(direction, targets):
         cur = ex.sl_int
         assert ex._profit_side(cur, prev) >= 0
         prev = cur
+
+
+@pytest.mark.property
+@settings(max_examples=200, deadline=None)
+@given(
+    direction=st.sampled_from([+1, -1]),
+    touches=st.lists(st.integers(min_value=900_000, max_value=1_400_000),
+                     min_size=1, max_size=30),
+)
+def test_staged_trail_never_retreats_through_on_bar(direction, touches):
+    """spec.md §17(v1.2ステージ⑤-A): 段階トレールの切替を含む on_bar 経路でも
+    SLは利益方向にしか動かない(ランダムな高値/安値列でステージ切替が起きても)。"""
+    broker = SimBroker(spread_ticks=2, min_stop_distance_ticks=0)
+    broker.process_bar(mk5(0, 1_010_000, 990_000, 1_000_000))
+    ex = AtrTrendExecution(position_id="propstage2", direction=direction, broker=broker)
+    intent = SimpleNamespace(
+        plan_id="p", direction=direction,
+        limit_price_int=1_000_000,
+        sl_int=1_000_000 - direction * 500_000,
+        tp1_int=1_000_000 + direction * 1_000,          # ほぼ即TP1到達 → RUNNERへ
+        fib_target_int=1_000_000 + direction * 50_000_000,   # 到達させない遠いTP2
+        trail_distance_ticks=20_000, volume_steps=2,
+        trail_stage2_trigger_int=30_000, trail_stage2_distance_ticks=60_000)
+    ex.place(intent)
+
+    def bar_for(i: int, touch: int) -> Candle:
+        if direction > 0:
+            return mk5(i, touch, touch - 100_000, touch - 50_000)
+        return mk5(i, touch + 100_000, touch, touch + 50_000)
+
+    prev_sl = ex.sl_int
+    for i, touch in enumerate(touches, start=1):
+        bar = bar_for(i, touch)
+        for e in broker.process_bar(bar):
+            ex.on_broker_event(e)
+        if ex.closed:
+            break
+        ex.on_bar(bar, None)
+        if ex.sl_int is not None:
+            assert ex._profit_side(ex.sl_int, prev_sl) >= 0
+            prev_sl = ex.sl_int
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +515,39 @@ class TestAtrTrendScalpProvider:
             make_provider(range_atr_mult_max=Decimal("-1"))
         with pytest.raises(ValueError):
             make_provider(atr_floor_bps=Decimal("-1"))
+        with pytest.raises(ValueError):
+            make_provider(trail_stage2_trigger_atr_mult=Decimal("-1"))
+        with pytest.raises(ValueError):
+            # trigger>0 のとき trail_stage2_atr_mult は必須(既定0のまま=不正)。
+            make_provider(trail_stage2_trigger_atr_mult=Decimal("1.5"))
+        with pytest.raises(ValueError):
+            # trail_stage2_atr_mult は trail_atr_mult(既定0.15)より大きい必要がある。
+            make_provider(trail_stage2_trigger_atr_mult=Decimal("1.5"),
+                          trail_stage2_atr_mult=Decimal("0.1"))
+        with pytest.raises(ValueError):
+            # trigger=0(既定)のまま distance だけ指定するのは不正。
+            make_provider(trail_stage2_atr_mult=Decimal("0.5"))
+
+    def test_stage2_trail_geometry_baked_into_plan(self):
+        p = make_provider(trail_stage2_trigger_atr_mult=Decimal("1.5"),
+                          trail_stage2_atr_mult=Decimal("0.5"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+        plan = out.plans[0]
+        # atr_at_entry_int(88) × 1.5 ≒ 132 / × 0.5 ≒ 44(ATR固定・整数丸め)。
+        assert plan.trail_stage2_trigger_int == round(plan.atr_at_entry_int * 1.5)
+        assert plan.trail_stage2_distance_ticks == max(
+            1, round(plan.atr_at_entry_int * 0.5))
+
+    def test_stage2_trail_off_by_default_zero_fields(self):
+        p = make_provider()   # trail_stage2_trigger_atr_mult 既定 0 = 無効
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+        plan = out.plans[0]
+        assert plan.trail_stage2_trigger_int == 0
+        assert plan.trail_stage2_distance_ticks == 0
 
 
 # ---------------------------------------------------------------------------

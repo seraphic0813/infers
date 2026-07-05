@@ -81,6 +81,8 @@ class AtrTrendScalpProvider:
                  vol_mult_max: Decimal = Decimal("0"),
                  range_atr_mult_max: Decimal = Decimal("0"),
                  atr_floor_bps: Decimal = Decimal("5.0"),
+                 trail_stage2_trigger_atr_mult: Decimal = Decimal("0"),
+                 trail_stage2_atr_mult: Decimal = Decimal("0"),
                  session_filter: bool = False,
                  session_start_hour_utc: int = 7,   # JST16:00 = UTC07:00
                  session_end_hour_utc: int = 16,    # JST25:00(翌01:00) = UTC16:00
@@ -102,6 +104,19 @@ class AtrTrendScalpProvider:
             raise ValueError("range_atr_mult_max must be >= 0")
         if atr_floor_bps < 0:
             raise ValueError("atr_floor_bps must be >= 0")
+        if trail_stage2_trigger_atr_mult < 0:
+            raise ValueError("trail_stage2_trigger_atr_mult must be >= 0")
+        if trail_stage2_trigger_atr_mult != 0:
+            if trail_stage2_atr_mult <= 0:
+                raise ValueError(
+                    "trail_stage2_atr_mult must be > 0 when "
+                    "trail_stage2_trigger_atr_mult is set")
+            if trail_stage2_atr_mult <= trail_atr_mult:
+                raise ValueError(
+                    "trail_stage2_atr_mult must be > trail_atr_mult")
+        elif trail_stage2_atr_mult != 0:
+            raise ValueError(
+                "trail_stage2_atr_mult requires trail_stage2_trigger_atr_mult > 0")
         if session_filter and not (0 <= session_start_hour_utc < session_end_hour_utc <= 24):
             raise ValueError("require 0 <= session_start < session_end <= 24 (no wrap)")
 
@@ -134,6 +149,8 @@ class AtrTrendScalpProvider:
         self._vol_mult_max = vol_mult_max
         self._range_atr_mult_max = range_atr_mult_max
         self._atr_floor_bps = atr_floor_bps
+        self._trail_stage2_trigger_atr_mult = trail_stage2_trigger_atr_mult
+        self._trail_stage2_atr_mult = trail_stage2_atr_mult
         self._session_filter = session_filter
         self._session_start = session_start_hour_utc
         self._session_end = session_end_hour_utc
@@ -242,6 +259,11 @@ class AtrTrendScalpProvider:
         trail = max(1, self._round(self._trail_atr_mult * atr_val))
         sl_dist = max(self._round(self._sl_atr_mult * atr_val),
                       self._min_stop_distance_ticks)
+        # v1.2 ステージ⑤-A: 段階式トレール(既定OFF。エントリー時ATR固定)。
+        stage2_trigger = (self._round(self._trail_stage2_trigger_atr_mult * atr_val)
+                          if self._trail_stage2_trigger_atr_mult != 0 else 0)
+        stage2_distance = (max(1, self._round(self._trail_stage2_atr_mult * atr_val))
+                           if self._trail_stage2_trigger_atr_mult != 0 else 0)
         # ATR が極小でTP1/TP2距離が縮退する足は見送り(有効な分割決済を作れない)。
         if atr_ticks < 1 or not (tp2_dist > tp1_dist >= 1):
             return out
@@ -264,6 +286,8 @@ class AtrTrendScalpProvider:
             volume_steps=self._volume_steps, sl_int=sl, expiry=_FAR_FUTURE,
             invalidation_price=sl, fib_target_int=tp2, tp1_int=tp1,
             trail_distance_ticks=trail, atr_at_entry_int=atr_ticks,
-            request=request, cluster_score=Decimal(3), ambiguity=Decimal(0)))
+            request=request, cluster_score=Decimal(3), ambiguity=Decimal(0),
+            trail_stage2_trigger_int=stage2_trigger,
+            trail_stage2_distance_ticks=stage2_distance))
         self._position = _PositionMirror(direction=direction, sl_int=sl, tp_int=tp2)
         return out

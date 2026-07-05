@@ -55,6 +55,9 @@ class AtrTrendPlan:
     w1_low_int: int = 0
     fib_levels: tuple[int, ...] = ()
     sr_zones: tuple[tuple[int, int], ...] = ()
+    # -- v1.2 ステージ⑤-A: 段階式トレール(既定OFF。spec.md §17) --
+    trail_stage2_trigger_int: int = 0     # 0=無効。エントリーからの利益ティック閾値
+    trail_stage2_distance_ticks: int = 0  # ステージ2トレール幅(ティック)
 
 
 @dataclass
