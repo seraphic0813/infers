@@ -185,6 +185,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="live: 追記専用ジャーナル(イベントソーシング)JSONLの出力先 "
                         "(省略時 work/journal/<symbol>_<UTC日付>.jsonl)。"
                         "python -m infers.journal replay で点検・回帰検証できる")
+    p.add_argument("--journal-eval", action="store_true",
+                   help="live: 毎確定足の評価結果(どのゲートで見送りになったか)を "
+                        "EVALイベントとしてジャーナルへ記録する。エントリーが長時間出ない "
+                        "ときの『沈黙の中身』を tools/eval_funnel.py で可視化できる。"
+                        "既定OFF(記録量が増えるため。取引ロジックには影響しない)")
     # HTMLレポート (backtest: 人間によるチェック用の可視化)
     p.add_argument("--report", metavar="DIR",
                    help="backtest: HTMLレポート出力ディレクトリ "
@@ -559,6 +564,7 @@ def run_live(args: argparse.Namespace) -> int:
             warm_bars=args.warm_bars,
             volume_sizer=live_sizer,
             execution_factory=build_execution_factory(args),
+            journal_eval=args.journal_eval,
         )
         try:
             bars = runner.run(max_bars=args.max_bars)

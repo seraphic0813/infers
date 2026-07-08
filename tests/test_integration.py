@@ -204,6 +204,56 @@ class TestLiveRunner:
         assert runner.loop.open_positions == {}
         assert broker.pending_count == 0
 
+    def test_journal_eval_records_one_eval_per_bar(self, tmp_path):
+        """--journal-eval 有効時、確定足ごとに EVAL イベントが1件記録され、
+        プランを出したバーは reason="signal"、それ以外はフォールバックになる
+        (gate=none 手法の per-bar 可観測性。取引ロジックには影響しない)。"""
+        from infers.journal import JournalWriter, read_journal
+        broker = LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        journal = JournalWriter(tmp_path / "eval.jsonl")
+        runner = LiveRunner(
+            feed=FakeFeed(CANDLES), spec=GOLD, tf=Timeframe.M5, broker=broker,
+            provider=ScriptedProvider(SCRIPT),
+            gateway=AiGateway(client=FakeClient(), cache=VerdictCache(), policy=POLICY),
+            risk=RiskManager(RiskConfig(max_position_volume_steps=4,
+                                        max_total_volume_steps=8, max_spread_ticks=10,
+                                        daily_loss_limit_tick_steps=10_000)),
+            fsm_config=FsmConfig(min_be_distance_ticks=10, be_offset_ticks=2,
+                                 breakout_buffer_ticks=10),
+            event_source=broker.process_bar, spread_fn=lambda: 2,
+            journal=journal, journal_eval=True,
+        )
+        runner.run(max_bars=len(CANDLES))
+        journal.close()
+        evals = [e for e in read_journal(tmp_path / "eval.jsonl") if e.kind == "EVAL"]
+        assert len(evals) == len(CANDLES)                 # 1バー=1EVAL
+        # SCRIPT はバー1でプランを出す(SCRIPT[1] に plans)。
+        assert evals[1].data["reason"] == "signal"
+        assert evals[1].data["n_plans"] == 1
+        # プランの無いバーは(ProviderOutput に reject_reason 属性が無いため)unknown。
+        assert evals[0].data["reason"] == "unknown"
+
+    def test_journal_eval_off_by_default_records_no_eval(self, tmp_path):
+        from infers.journal import JournalWriter, read_journal
+        broker = LedgerBroker(spread_ticks=2, min_stop_distance_ticks=5)
+        journal = JournalWriter(tmp_path / "noeval.jsonl")
+        runner = LiveRunner(
+            feed=FakeFeed(CANDLES), spec=GOLD, tf=Timeframe.M5, broker=broker,
+            provider=ScriptedProvider(SCRIPT),
+            gateway=AiGateway(client=FakeClient(), cache=VerdictCache(), policy=POLICY),
+            risk=RiskManager(RiskConfig(max_position_volume_steps=4,
+                                        max_total_volume_steps=8, max_spread_ticks=10,
+                                        daily_loss_limit_tick_steps=10_000)),
+            fsm_config=FsmConfig(min_be_distance_ticks=10, be_offset_ticks=2,
+                                 breakout_buffer_ticks=10),
+            event_source=broker.process_bar, spread_fn=lambda: 2,
+            journal=journal,                              # journal_eval 省略 = 既定False
+        )
+        runner.run(max_bars=len(CANDLES))
+        journal.close()
+        evals = [e for e in read_journal(tmp_path / "noeval.jsonl") if e.kind == "EVAL"]
+        assert evals == []
+
     def test_warm_up_calls_reset_position_mirror_hook(self, monkeypatch):
         """ウォームアップ完了直後、自己ミラー式プロバイダの reset_position_mirror が
         ライブ処理開始より前に1回だけ呼ばれる (smc_bos のファントム建玉バグの

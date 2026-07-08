@@ -251,14 +251,17 @@ class AtrTrendScalpProvider:
         if self._position is not None and self._position.touched_exit(candle):
             self._position = None
         if self._position is not None:
+            out.reject_reason = "position_open"
             return out
         if not self._in_session(candle):
+            out.reject_reason = "out_of_session"
             return out
 
         # 全指標のウォームアップ完了が前提。
         if (ema_fast is None or ema_medium is None or atr_val is None
                 or vol_sma is None or ema_trend is None or self._htf_close is None
                 or len(self._atr_window) < self._atr_avg_period):
+            out.reject_reason = "warmup"
             return out
 
         # 条件1(上位足バイアス)+ 条件2(短期モメンタム)で方向を確定。
@@ -267,6 +270,7 @@ class AtrTrendScalpProvider:
         elif ema_fast < ema_medium and self._htf_close < ema_trend:
             direction = -1
         else:
+            out.reject_reason = "no_direction"
             return out
 
         # 条件3(リトレース): 窓内で押し目/戻りタッチ かつ 当足で EMA21 を回復。
@@ -277,24 +281,30 @@ class AtrTrendScalpProvider:
             touched = any(a for _, a in self._retrace)
             rebounded = Decimal(candle.c_int) < ema_medium
         if not (touched and rebounded):
+            out.reject_reason = "no_retrace"
             return out
 
         # 条件4(ボラ&出来高フィルタ)。
         avg_atr = sum(self._atr_window, Decimal(0)) / self._atr_avg_period
         if atr_val < self._atr_vol_mult * avg_atr:
+            out.reject_reason = "atr_vol_filter"
             return out
         # 相対ボラフロア(v1.2 ステージ③・既定OFF。価格比bpsで判定し年による
         # 価格水準変化の影響を受けない)。
         if (self._atr_floor_bps != 0
                 and atr_val * Decimal(10000) < self._atr_floor_bps * Decimal(candle.c_int)):
+            out.reject_reason = "atr_floor"
             return out
         if Decimal(candle.volume) < self._vol_mult * vol_sma:
+            out.reject_reason = "volume_filter"
             return out
         # スパイク足フィルター(v1.2 ステージ①・既定OFF)。
         if self._vol_mult_max != 0 and Decimal(candle.volume) > self._vol_mult_max * vol_sma:
+            out.reject_reason = "spike_vol"
             return out
         if (self._range_atr_mult_max != 0
                 and Decimal(candle.h_int - candle.l_int) > self._range_atr_mult_max * atr_val):
+            out.reject_reason = "spike_range"
             return out
 
         # 出口ジオメトリ(エントリー時ATR固定)。
@@ -311,6 +321,7 @@ class AtrTrendScalpProvider:
                            if self._trail_stage2_trigger_atr_mult != 0 else 0)
         # ATR が極小でTP1/TP2距離が縮退する足は見送り(有効な分割決済を作れない)。
         if atr_ticks < 1 or not (tp2_dist > tp1_dist >= 1):
+            out.reject_reason = "atr_degenerate"
             return out
 
         entry = candle.c_int
@@ -337,4 +348,5 @@ class AtrTrendScalpProvider:
         self._position = _PositionMirror(
             direction=direction, entry_int=entry, sl_int=sl,
             tp1_int=tp1, tp2_int=tp2, trail_distance=trail)
+        out.reject_reason = "signal"
         return out

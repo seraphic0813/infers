@@ -501,6 +501,65 @@ class TestAtrTrendScalpProvider:
         out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
         assert out.plans == []
 
+    # -- reject_reason 可視化注釈(取引ロジックには影響しない。--journal-eval 用) --
+
+    def test_reject_reason_warmup(self):
+        p = make_provider()
+        out = p.on_candle(mk5(0, 1010, 990, 1000))
+        assert out.plans == []
+        assert out.reject_reason == "warmup"
+
+    def test_reject_reason_signal_on_emit(self):
+        p = make_provider()
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+        assert out.reject_reason == "signal"
+
+    def test_reject_reason_no_direction_on_bias_momentum_conflict(self):
+        # 上昇でウォームアップ(上位足バイアス+1)後、短期だけ急落させると
+        # 短期モメンタム(EMA9<EMA21)と上位足バイアス(+1)が食い違い、方向不成立。
+        p = make_provider()
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1010, 890, 900, vol=100))
+        assert out.plans == []
+        assert out.reject_reason == "no_direction"
+
+    def test_reject_reason_no_retrace(self):
+        p = make_provider()
+        _warm_long_setup(p)
+        # 押し目タッチ無し(安値がEMA21を下抜けない)→ no_retrace で見送り。
+        out = p.on_candle(mk5(9, 1140, 1130, 1135, vol=100))
+        assert out.plans == []
+        assert out.reject_reason == "no_retrace"
+
+    def test_reject_reason_volume_filter(self):
+        p = make_provider(vol_mult=Decimal("5"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert out.plans == []
+        assert out.reject_reason == "volume_filter"
+
+    def test_reject_reason_out_of_session(self):
+        p = make_provider(session_filter=True)   # T0=UTC00:00 は窓外
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert out.plans == []
+        assert out.reject_reason == "out_of_session"
+
+    def test_reject_reason_position_open(self):
+        p = make_provider()
+        _warm_long_setup(p)
+        p.on_candle(mk5(9, 1140, 980, 1135, vol=100))       # 建玉(ミラー)
+        out = p.on_candle(mk5(10, 1160, 1120, 1155, vol=100))
+        assert out.plans == []
+        assert out.reject_reason == "position_open"
+
+    def test_reject_reason_default_none(self):
+        # 注釈は既定 None(理由を設定しない出力経路が無いことの回帰保護)。
+        from infers.strategies.atr_trend_scalp.signals import AtrTrendOutput
+        assert AtrTrendOutput().reject_reason is None
+
     def test_constructor_validates(self):
         with pytest.raises(ValueError):
             make_provider(min_stop_distance_ticks=0)
