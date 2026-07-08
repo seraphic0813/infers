@@ -424,6 +424,7 @@ class LiveRunner:
         volume_sizer=None,                        # VolumeSizer | None
         execution_factory: "Callable[..., ExecutionModel] | None" = None,
         heartbeat_interval_s: float = 300.0,       # 無音検知用ハートビート間隔(改善プランT13。0で無効)
+        journal_eval: bool = False,               # 毎バーの評価結果をEVALとして記録(可視化。既定OFF)
     ) -> None:
         self._feed = feed
         self._spec = spec
@@ -435,6 +436,7 @@ class LiveRunner:
         self._spread_fn = spread_fn or broker.current_spread_ticks
         self._heartbeat_interval_s = heartbeat_interval_s
         self._journal = journal
+        self._journal_eval = journal_eval
         # ライブ EquityProvider: MT5LiveBroker が equity() を実装しているので直接注入。
         equity_prov = broker if volume_sizer is not None else None
         self.loop = TradingLoop(broker=broker, gateway=gateway,
@@ -573,6 +575,20 @@ class LiveRunner:
                 self.loop.on_broker_events(self._event_source(candle))
                 output = self._provider.on_candle(candle)
                 self.loop.on_candle(candle, output, spread_ticks=self._spread_fn())
+                # 可視化(改善: 沈黙の中身): 毎バーの評価結果=どのゲートで見送りに
+                # なったか(プランを出したバーは "signal")を EVAL として記録する。
+                # ゲートなし手法(--ai-client none)は VERDICT を残さないため、
+                # 本フラグがエントリー未発生時の唯一の per-bar 可観測性になる。
+                # 取引ロジックには一切関与しない純粋な追記(loop.on_candle 後に置くのは
+                # ジャーナルの bar_time が当足へ設定済みになるため)。
+                if self._journal_eval and self._journal is not None:
+                    reason = getattr(output, "reject_reason", None)
+                    n_plans = len(getattr(output, "plans", []) or [])
+                    self._journal.record("EVAL", {
+                        "reason": reason if reason is not None
+                        else ("signal" if n_plans else "unknown"),
+                        "n_plans": n_plans,
+                    })
                 bars += 1
 
                 # 定期リコンサイル (安全網: あらゆる原因のズレを上限間隔内に検出)
