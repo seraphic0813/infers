@@ -179,9 +179,25 @@ def _build_atr_trend_scalp(*, symbol: str, tf: Timeframe) -> SignalProvider:
 
     判定TFはM5想定だが、レジストリ規約に合わせ呼び出し元が渡す tf をそのまま使う
     (CLI利用時は `--tf M5` を明示。上位足M15は provider 内部でリサンプルする)。
+
+    既定値は v1.2(`atr_floor_bps=5.0`=相対ボラフロア採用。spec.md §15)。
     """
     from infers.strategies.atr_trend_scalp.provider import AtrTrendScalpProvider
     return AtrTrendScalpProvider(symbol=symbol, tf=tf)
+
+
+def _build_atr_trend_scalp_v11(*, symbol: str, tf: Timeframe) -> SignalProvider:
+    """v1.1 確定構成(相対ボラフロア無効。spec.md §12)。
+
+    v1.1 と v1.2 の差分は `atr_floor_bps` のみ(v1.1=0=無効 / v1.2=5.0)。他パラメータ
+    (vol_mult=1.6 / tp1=0.5 / tp2=3.0 / trail=0.15)は同一。v1.2 はボラの低い足を
+    見送るぶんエントリー頻度が下がる(5年で 2,963→1,969 トレード)。エントリー頻度を
+    優先してデモ稼働したい場合の選択肢として v1.1 を名前付きで登録する
+    (v1.1黄金値: PF1.550419248 / 2,963トレード / DD$71.02。spec.md §12)。
+    """
+    from decimal import Decimal
+    from infers.strategies.atr_trend_scalp.provider import AtrTrendScalpProvider
+    return AtrTrendScalpProvider(symbol=symbol, tf=tf, atr_floor_bps=Decimal("0"))
 
 
 def _build_atr_trend_execution(*, position_id, direction, broker, config,
@@ -200,5 +216,15 @@ register(StrategySpec(
                 "EMA9/21クロス + EMA21押し目 + ATR/出来高フィルタ + 上位足(M15)EMA50バイアスで"
                 "成行参入。50/50分割(TP1半利+建値化+0.5×ATRトレール+TP2)。"
                 "Narrow Focus / market_tpsl / smc_bos とは別の執行ライフサイクル",
+    report_spec=ATR_TREND_SCALP_REPORT_SPEC,
+))
+
+register(StrategySpec(
+    name="atr_trend_scalp_v11",
+    build=_build_atr_trend_scalp_v11,
+    build_execution=_build_atr_trend_execution,
+    description="atr_trend_scalp の v1.1 確定構成(相対ボラフロア atr_floor_bps=0=無効)。"
+                "v1.2 との差分は atr_floor_bps のみ。ボラフロアを外すぶんエントリー頻度が"
+                "高い(5年で v1.2 の1,969→2,963トレード)。執行・レポートは v1.2 と共通",
     report_spec=ATR_TREND_SCALP_REPORT_SPEC,
 ))

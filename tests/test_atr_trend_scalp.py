@@ -622,6 +622,27 @@ class TestRegistryWiring:
         prov = spec.build(symbol="XAUUSD", tf=Timeframe.M5)
         assert isinstance(prov, AtrTrendScalpProvider)
 
+    def test_v12_default_enables_atr_floor(self):
+        # 既定(atr_trend_scalp)は v1.2 = atr_floor_bps 5.0(相対ボラフロア有効)。
+        prov = get_strategy("atr_trend_scalp").build(symbol="XAUUSD", tf=Timeframe.M5)
+        assert prov._atr_floor_bps == Decimal("5.0")
+
+    def test_v11_preset_disables_atr_floor(self):
+        # v1.1 プリセットは atr_floor_bps=0(無効)。他は v1.2 と同一(執行・レポート共通)。
+        spec = get_strategy("atr_trend_scalp_v11")
+        assert spec.name == "atr_trend_scalp_v11"
+        assert spec.build_execution is get_strategy("atr_trend_scalp").build_execution
+        assert spec.report_spec is not None
+        prov = spec.build(symbol="XAUUSD", tf=Timeframe.M5)
+        assert isinstance(prov, AtrTrendScalpProvider)
+        assert prov._atr_floor_bps == Decimal("0")
+        # v1.1/v1.2 の差分は atr_floor_bps のみ(他パラメータは一致)。
+        v12 = get_strategy("atr_trend_scalp").build(symbol="XAUUSD", tf=Timeframe.M5)
+        assert prov._vol_mult == v12._vol_mult
+        assert prov._tp1_atr_mult == v12._tp1_atr_mult
+        assert prov._tp2_atr_mult == v12._tp2_atr_mult
+        assert prov._trail_atr_mult == v12._trail_atr_mult
+
 
 # ---------------------------------------------------------------------------
 # 5. 結合: BacktestEngine + AiGateway(パススルー) が AtrTrendExecution を駆動
