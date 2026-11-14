@@ -200,6 +200,18 @@ def _build_atr_trend_scalp_v11(*, symbol: str, tf: Timeframe) -> SignalProvider:
     return AtrTrendScalpProvider(symbol=symbol, tf=tf, atr_floor_bps=Decimal("0"))
 
 
+def _build_atr_trend_scalp_v13(*, symbol: str, tf: Timeframe) -> SignalProvider:
+    """v1.3 確定構成(TP1 を 0.5→0.4×ATR へ前倒し。improvement-plan-v1.3.md / spec.md §18)。
+
+    v1.2 との差分は `tp1_atr_mult` のみ。事前宣言基準 a〜g をすべて満たして採用
+    (調整用期間 PF 1.6111→1.6581、未使用期間 2026-06-12〜11-13 PF 1.0772→1.1566)。
+    稼働中デモの既定構成を不意に変えないため、既定値は v1.2 のまま名前付きで登録する。
+    """
+    from decimal import Decimal
+    from infers.strategies.atr_trend_scalp.provider import AtrTrendScalpProvider
+    return AtrTrendScalpProvider(symbol=symbol, tf=tf, tp1_atr_mult=Decimal("0.4"))
+
+
 def _build_atr_trend_execution(*, position_id, direction, broker, config,
                                journal_sink=None) -> ExecutionModel:
     """成行参入 + 50/50分割(TP1半利+建値化+0.5×ATRトレール+TP2)の執行モデル生成器。"""
@@ -226,5 +238,14 @@ register(StrategySpec(
     description="atr_trend_scalp の v1.1 確定構成(相対ボラフロア atr_floor_bps=0=無効)。"
                 "v1.2 との差分は atr_floor_bps のみ。ボラフロアを外すぶんエントリー頻度が"
                 "高い(5年で v1.2 の1,969→2,963トレード)。執行・レポートは v1.2 と共通",
+    report_spec=ATR_TREND_SCALP_REPORT_SPEC,
+))
+
+register(StrategySpec(
+    name="atr_trend_scalp_v13",
+    build=_build_atr_trend_scalp_v13,
+    build_execution=_build_atr_trend_execution,
+    description="atr_trend_scalp の v1.3 確定構成(TP1=0.4×ATR。v1.2 は 0.5)。"
+                "v1.2 との差分は tp1_atr_mult のみ。執行・レポートは v1.2 と共通",
     report_spec=ATR_TREND_SCALP_REPORT_SPEC,
 ))
