@@ -643,6 +643,20 @@ class TestRegistryWiring:
         assert prov._tp2_atr_mult == v12._tp2_atr_mult
         assert prov._trail_atr_mult == v12._trail_atr_mult
 
+    def test_v13_preset_moves_tp1_only(self):
+        # v1.3 プリセットは tp1_atr_mult=0.4。v1.2 との差分は tp1 のみ(improvement-plan-v1.3.md)。
+        spec = get_strategy("atr_trend_scalp_v13")
+        assert spec.build_execution is get_strategy("atr_trend_scalp").build_execution
+        assert spec.report_spec is not None
+        prov = spec.build(symbol="XAUUSD", tf=Timeframe.M5)
+        v12 = get_strategy("atr_trend_scalp").build(symbol="XAUUSD", tf=Timeframe.M5)
+        assert prov._tp1_atr_mult == Decimal("0.4")
+        assert v12._tp1_atr_mult == Decimal("0.5")
+        assert prov._atr_floor_bps == v12._atr_floor_bps
+        assert prov._vol_mult == v12._vol_mult
+        assert prov._tp2_atr_mult == v12._tp2_atr_mult
+        assert prov._trail_atr_mult == v12._trail_atr_mult
+
 
 # ---------------------------------------------------------------------------
 # 5. 結合: BacktestEngine + AiGateway(パススルー) が AtrTrendExecution を駆動
