@@ -12,7 +12,7 @@ from __future__ import annotations
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from infers.data.feed import FeedError, MarketFeed, ensure_utc
 from infers.core.models import Candle, SymbolSpec, Timeframe, utc_now
@@ -39,6 +39,8 @@ class MT5Feed(MarketFeed):
         reconnect_base_s: float = 1.0,     # 再接続バックオフの初期待機 (指数増)
         reconnect_max_s: float = 60.0,     # 再接続バックオフの上限待機
         max_reconnect_attempts: int = 10,  # 連続再接続の試行上限 (超過で FeedError)。0=無制限
+        offset_probe_attempts: int = 10,   # オフセット実測時にティック前進を待つ試行回数
+        offset_probe_interval_s: float = 0.5,
     ) -> None:
         # server_utc_offset: ブローカーサーバー時刻 − UTC。MT5 の rates['time'] は
         # サーバー時刻基準の epoch 秒であり、ここで UTC へ正規化する。
@@ -48,6 +50,12 @@ class MT5Feed(MarketFeed):
         self._offset = server_utc_offset if server_utc_offset is not None else timedelta(0)
         self._auto_offset = auto_detect_offset and server_utc_offset is None
         self._offset_detected = False
+        self._offset_probe_attempts = max(1, offset_probe_attempts)
+        self._offset_probe_interval_s = offset_probe_interval_s
+        # フィードが最後に価格の変化 (形成足の更新) を観測した壁時計時刻 (UTC)。
+        # LiveRunner のハートビートが「市場は動いているのに確定足が来ない」を判定する材料。
+        self.last_activity_utc: datetime | None = None
+        self._last_window_sig: tuple | None = None
         self._poll_interval_s = poll_interval_s
         self._poll_lookback = max(1, poll_lookback)
         self._reconnect_base_s = reconnect_base_s
@@ -107,26 +115,69 @@ class MT5Feed(MarketFeed):
         """MT5 の rates['time'] (サーバー時刻基準 epoch 秒) → tz-aware UTC。"""
         return datetime.fromtimestamp(int(epoch_s), tz=timezone.utc) - self._offset
 
-    def _ensure_offset(self, spec: SymbolSpec) -> None:
-        """サーバー時刻オフセット未確定なら symbol_info_tick から1回だけ実測する。
+    @property
+    def server_utc_offset(self) -> timedelta:
+        """現在適用中のサーバー時刻オフセット (サーバー時刻 − UTC)。"""
+        return self._offset
 
-        明示指定があれば何もしない。検出不能 (古いモック・APIなし・tick欠落) は
-        0 のままにフォールバックし、例外で稼働を止めない。ブローカー非依存・DST対応。
+    @property
+    def offset_pending(self) -> bool:
+        """自動実測モードでオフセットがまだ確定していない (市場休場中など)。"""
+        return self._auto_offset and not self._offset_detected
+
+    def _ensure_offset(self, spec: SymbolSpec) -> bool:
+        """サーバー時刻オフセット未確定なら symbol_info_tick から実測する。確定したら True。
+
+        最終ティックが新しい (= 市場が開いている) ときだけ確定させる。週末は最終ティックが
+        金曜のままなので、そこから算出すると −39h のような値になり、以後すべての足が
+        「未来足」と判定されて永久に流れない (2026-07-05/12 のデモで発生)。そこで
+        「ティックが前進した」かつ「新しいティックの差分がほぼ整数時間 (±2分) で |offset|≤14h」
+        の両方を満たしたときだけ確定する。満たさなければ未確定のまま False を返し、
+        呼び出し側が再試行する。明示指定があれば何もしない。tick API 自体が無い・例外の
+        場合は従来どおり 0 で確定する。
         """
         if not self._auto_offset or self._offset_detected:
-            return
-        self._offset_detected = True
+            return True
         mt5 = self._mt5
         if mt5 is None:
-            return
+            return False
         try:
-            tick = mt5.symbol_info_tick(spec.name)
-            t = getattr(tick, "time", 0) if tick is not None else 0
-            if t:
-                now = utc_now().timestamp()
-                self._offset = timedelta(hours=round((t - now) / 3600.0))
+            first = mt5.symbol_info_tick(spec.name)
         except Exception:                       # noqa: BLE001 — 検出失敗は 0 へフォールバック
-            pass
+            first = None
+        t0 = getattr(first, "time", 0) if first is not None else 0
+        if not t0:
+            self._offset_detected = True        # 検出手段なし: 従来どおり 0 で確定
+            return True
+        stamp0 = getattr(first, "time_msc", None) or t0 * 1000
+        for _ in range(self._offset_probe_attempts):
+            time.sleep(self._offset_probe_interval_s)
+            try:
+                tick = mt5.symbol_info_tick(spec.name)
+            except Exception:                   # noqa: BLE001
+                continue
+            t = getattr(tick, "time", 0) if tick is not None else 0
+            stamp = (getattr(tick, "time_msc", None) or t * 1000) if t else 0
+            if not stamp or stamp == stamp0:
+                continue                        # 前進なし (休場中の可能性)
+            delta = t - utc_now().timestamp()
+            hours = round(delta / 3600.0)
+            if abs(hours) <= 14 and abs(delta - hours * 3600) <= 120:
+                self._offset = timedelta(hours=hours)
+                self._offset_detected = True
+                return True
+        return False
+
+    def wait_for_offset(self, spec: SymbolSpec, *, stop: threading.Event | None = None,
+                        retry_s: float = 60.0,
+                        on_wait: "Callable[[], None] | None" = None) -> bool:
+        """オフセットが確定するまで待つ (市場が開くまでブロック)。stop で中断したら False。"""
+        while not self._ensure_offset(spec):
+            if on_wait is not None:
+                on_wait()
+            if self._interruptible_sleep(retry_s, stop):
+                return False
+        return True
 
     def _row_to_candle(self, row: Any, spec: SymbolSpec, tf: Timeframe) -> Candle:
         """MT5 の rates 1行 (numpy structured row, float価格) → Candle。
@@ -166,7 +217,10 @@ class MT5Feed(MarketFeed):
         ensure_utc(start, "start")
         ensure_utc(end, "end")
         mt5 = self._require_mt5()
-        self._ensure_offset(spec)
+        if not self._ensure_offset(spec):
+            raise FeedError(
+                "server UTC offset undetermined (market closed?): wait for the market "
+                "to open or pass an explicit server_utc_offset (--server-utc-offset)")
 
         # copy_rates_range はサーバー時刻基準で範囲指定するため逆変換して渡す
         rates = mt5.copy_rates_range(
@@ -210,12 +264,17 @@ class MT5Feed(MarketFeed):
           - stop セットで速やかに終了する。
         """
         last_open: datetime | None = None
-        self._ensure_offset(spec)
 
         while stop is None or not stop.is_set():
             rates = self._poll_with_reconnect(spec, tf, stop)
             if rates is None:
                 return                          # stop で中断
+            self._note_activity(rates)
+            if not self._ensure_offset(spec):
+                # オフセット未確定のまま足を流すと時刻ラベルが壊れる → 確定まで流さない
+                if self._interruptible_sleep(self._poll_interval_s, stop):
+                    return
+                continue
             now = utc_now()
             window = self._closed_candles(rates, tf, now, spec)
             for candle in self._with_backfill(window, last_open, spec, tf, now):
@@ -272,6 +331,20 @@ class MT5Feed(MarketFeed):
         if not mt5.initialize(**self._init_kwargs):
             raise FeedError(f"mt5.initialize failed on reconnect: {mt5.last_error()}")
         self.reconnect_count += 1               # 復帰成功 → 上位のリコンサイル起動フック
+
+    def _note_activity(self, rates) -> None:
+        """窓の最新行 (形成足) が変化したら、その壁時計時刻を last_activity_utc に記録する。"""
+        if rates is None or len(rates) == 0:
+            return
+        row = rates[-1]
+        try:
+            sig = (int(row["time"]), float(row["close"]), int(row["tick_volume"]))
+        except (KeyError, IndexError, TypeError, ValueError):
+            return
+        if sig != self._last_window_sig:
+            if self._last_window_sig is not None:
+                self.last_activity_utc = datetime.now(timezone.utc)
+            self._last_window_sig = sig
 
     def _closed_candles(self, rates, tf: Timeframe, now: datetime,
                         spec: SymbolSpec) -> list[Candle]:

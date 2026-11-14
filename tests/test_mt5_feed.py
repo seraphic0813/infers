@@ -165,15 +165,61 @@ class TestOffsetAutoDetect:
         now = datetime(2026, 6, 16, 12, 0, tzinfo=UTC)
         monkeypatch.setattr(mt5_feed, "utc_now", lambda: now)
         fake = FakeMt5(_series(0), [])
-        # サーバー時刻 = UTC+3 (tick.time が3時間先)
-        fake.symbol_info_tick = lambda name: _Tick(int(now.timestamp()) + 3 * 3600)
-        feed = _make_feed(fake)                 # auto_detect_offset 既定 True
-        feed._ensure_offset(GOLD)
+        # サーバー時刻 = UTC+3 (tick.time が3時間先)。ティックは前進している (=開場中)
+        ticks = iter(range(10))
+        fake.symbol_info_tick = lambda name: _Tick(int(now.timestamp()) + 3 * 3600
+                                                   + next(ticks))
+        feed = _make_feed(fake, offset_probe_interval_s=0.0)  # auto_detect_offset 既定 True
+        assert feed._ensure_offset(GOLD) is True
         assert feed._offset == timedelta(hours=3)
         # 2回目は再検出しない
         fake.symbol_info_tick = lambda name: _Tick(int(now.timestamp()) + 9 * 3600)
         feed._ensure_offset(GOLD)
         assert feed._offset == timedelta(hours=3)
+
+    def test_weekend_stale_tick_leaves_offset_pending(self, monkeypatch):
+        """週末 (最終ティックが金曜のまま前進しない) はオフセットを確定しない。
+
+        回帰: 2026-07-12(日) 起動で −39h を誤検出し、以後すべての足が未来足扱いで
+        1本も流れなかった。未確定の間は get_history も時刻ラベルを壊さず失敗する。
+        """
+        from datetime import datetime, timedelta
+
+        now = datetime(2026, 7, 12, 14, 57, tzinfo=UTC)      # 日曜
+        monkeypatch.setattr(mt5_feed, "utc_now", lambda: now)
+        friday_last = int(datetime(2026, 7, 10, 20, 58, 30, tzinfo=UTC).timestamp()) + 3 * 3600
+        fake = FakeMt5(_series(0), [])
+        fake.symbol_info_tick = lambda name: _Tick(friday_last)
+        feed = _make_feed(fake, offset_probe_interval_s=0.0)
+        assert feed._ensure_offset(GOLD) is False
+        assert feed.offset_pending
+        assert feed._offset == timedelta(0)
+        with pytest.raises(FeedError):
+            feed.get_history(GOLD, Timeframe.M5, now - timedelta(hours=1), now)
+
+    def test_iter_closed_withholds_bars_until_offset_known(self, monkeypatch):
+        """オフセット未確定の間は足を流さず、確定後に正しいラベルで流す。"""
+        from datetime import timedelta
+
+        stop = threading.Event()
+        now = _open_utc(5)
+        monkeypatch.setattr(mt5_feed, "utc_now", lambda: now)
+        fake = FakeMt5(_series(3), [[_bar(0), _bar(1), _bar(2)]] * 3, stop=stop)
+        state = {"t": int(now.timestamp()) - 39 * 3600, "calls": 0}
+
+        def tick(name):
+            # 最初の2回の実測 (各2サンプル) は休場 (前進なし)、以後は開場 (UTC+0 で前進)
+            state["calls"] += 1
+            if state["calls"] > 6:
+                state["t"] = int(now.timestamp()) + state["calls"]
+            return _Tick(state["t"])
+
+        fake.symbol_info_tick = tick
+        feed = _make_feed(fake, offset_probe_interval_s=0.0, offset_probe_attempts=2)
+        candles = _drain(feed, stop)
+        assert not feed.offset_pending
+        assert feed._offset == timedelta(0)
+        assert [c.open_time for c in candles] == [_open_utc(i) for i in range(3)]
 
     def test_explicit_offset_disables_autodetect(self):
         from datetime import timedelta

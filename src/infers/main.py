@@ -181,6 +181,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "(MetaTrader5パッケージの仕様: pathを明示しないと"
                         "どのターミナルに繋がるか不定。複数ターミナルを同時稼働"
                         "させる場合は手法ごとに別々のパスを明示すること)")
+    p.add_argument("--server-utc-offset", type=int, metavar="HOURS",
+                   help="live/export: ブローカーサーバー時刻 − UTC (時間)。省略時は "
+                        "最新ティックから自動実測する(市場が開いていてティックが前進する"
+                        "まで確定しない。週末の export では明示指定が必要)")
     p.add_argument("--journal", metavar="PATH",
                    help="live: 追記専用ジャーナル(イベントソーシング)JSONLの出力先 "
                         "(省略時 work/journal/<symbol>_<UTC日付>.jsonl)。"
@@ -522,26 +526,86 @@ def _open_live_journal(args: argparse.Namespace):
         "ai_client": resolve_ai_client(args),
         "demo": bool(args.demo and not args.allow_real_account),
         "prompt_version": PROMPT_VERSION,
+        "strategy": getattr(args, "strategy", None),
+        **_git_state(),
     })
     return journal
 
 
+def _git_state() -> dict:
+    """稼働中コードの特定用 (起動元のコミットと未コミット変更の有無)。取得失敗は None。"""
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[2]
+    def _git(*a: str) -> str | None:
+        try:
+            out = subprocess.run(["git", "-C", str(repo), *a], capture_output=True,
+                                 text=True, timeout=10, check=True)
+            return out.stdout.strip()
+        except Exception:                       # noqa: BLE001 — git が無い環境では記録しない
+            return None
+    status = _git("status", "--porcelain", "--untracked-files=no")
+    return {"git_commit": _git("rev-parse", "HEAD"),
+            "git_branch": _git("rev-parse", "--abbrev-ref", "HEAD"),
+            "git_dirty": None if status is None else bool(status)}
+
+
+def _server_offset(args: argparse.Namespace) -> "timedelta | None":
+    hours = getattr(args, "server_utc_offset", None)
+    return None if hours is None else timedelta(hours=hours)
+
+
 def run_live(args: argparse.Namespace) -> int:
     from infers.data.mt5_feed import MT5Feed
-    from infers.execution.mt5_adapter import LiveRunner, MT5LiveBroker
+    from infers.execution.mt5_adapter import MT5LiveBroker
 
     if not args.demo and not args.allow_real_account:
         print("error: real account requires --allow-real-account "
               "(デモ口座での検証を先に完了してください)", file=sys.stderr)
         return 2
 
+    import faulthandler
+    import traceback
+
+    # 異常終了の痕跡を残す: stdout は行バッファ (リダイレクト先でも即書き出し)、
+    # ネイティブクラッシュは faulthandler が stderr へダンプする。
+    sys.stdout.reconfigure(line_buffering=True)
+    faulthandler.enable()
+
     spec = SYMBOLS[args.symbol]
-    feed = MT5Feed(terminal_path=args.terminal_path)
+    feed = MT5Feed(terminal_path=args.terminal_path,
+                   server_utc_offset=_server_offset(args))
     broker = MT5LiveBroker(spec)
     journal = _open_live_journal(args)
     print(f"journal: {journal.path}")
+    try:
+        return _run_live_session(args, spec, feed, broker, journal)
+    except BaseException as e:
+        if not isinstance(e, KeyboardInterrupt):
+            # 未捕捉例外で終了する前に、原因をジャーナルへ残す (ログは上書きされうる)
+            journal.record("CRASH", {
+                "type": type(e).__name__, "message": str(e),
+                "traceback": traceback.format_exc(limit=30)})
+        raise
+    finally:
+        feed.close()
+        journal.close()
+
+
+def _run_live_session(args, spec, feed, broker, journal) -> int:
+    from infers.execution.mt5_adapter import LiveRunner
+
     feed.connect()
     broker.connect(terminal_path=args.terminal_path)
+    # サーバー時刻オフセットの確定を待つ (休場中はティックが進まないので開場まで待機)。
+    # 確定前にウォームアップすると全履歴の時刻ラベルが壊れる (週末起動バグ)。
+    if feed.offset_pending:
+        print("waiting for market open to determine server UTC offset...",
+              file=sys.stderr)
+        journal.record("OFFSET_WAIT", {})
+        feed.wait_for_offset(spec)
+    journal.record("FEED_OFFSET", {"server_utc_offset_hours":
+                                   feed.server_utc_offset.total_seconds() / 3600})
     # 可変ロットサイジング (--risk-pct 指定時のみ有効)
     live_sizer = None
     if args.risk_pct is not None:
@@ -554,33 +618,29 @@ def run_live(args: argparse.Namespace) -> int:
             max_volume_steps=DEFAULT_RISK.max_position_volume_steps,
         ))
         print(f"sizing: risk={args.risk_pct*100:.1f}%  tick_value={tick_val}/tick/step")
+    runner = LiveRunner(
+        feed=feed, spec=spec, tf=Timeframe(args.tf), broker=broker,
+        provider=build_provider(args),
+        gateway=_build_gateway(args),
+        risk=RiskManager(DEFAULT_RISK), fsm_config=DEFAULT_FSM,
+        journal=journal,
+        warm_bars=args.warm_bars,
+        volume_sizer=live_sizer,
+        execution_factory=build_execution_factory(args),
+        journal_eval=args.journal_eval,
+    )
     try:
-        runner = LiveRunner(
-            feed=feed, spec=spec, tf=Timeframe(args.tf), broker=broker,
-            provider=build_provider(args),
-            gateway=_build_gateway(args),
-            risk=RiskManager(DEFAULT_RISK), fsm_config=DEFAULT_FSM,
-            journal=journal,
-            warm_bars=args.warm_bars,
-            volume_sizer=live_sizer,
-            execution_factory=build_execution_factory(args),
-            journal_eval=args.journal_eval,
-        )
-        try:
-            bars = runner.run(max_bars=args.max_bars)
-            print(f"processed {bars} closed bars")
-        except KeyboardInterrupt:
-            # Ctrl+C による手動停止 (デモ運用のニュース回避手順)。安全停止へ回す。
-            print("interrupted — graceful shutdown", file=sys.stderr)
-        # 正常終了・中断のいずれでも安全停止: 未約定の打診指値を取消し残玉を手仕舞う
-        # (停止後にブローカーへ孤児注文を残さない。デモのニュース前停止が安全になる)。
-        closed = runner.shutdown()
-        if closed:
-            print(f"shutdown: cancelled/closed {len(closed)} position(s): {closed}")
-        return 0
-    finally:
-        feed.close()
-        journal.close()
+        bars = runner.run(max_bars=args.max_bars)
+        print(f"processed {bars} closed bars")
+    except KeyboardInterrupt:
+        # Ctrl+C による手動停止 (デモ運用のニュース回避手順)。安全停止へ回す。
+        print("interrupted — graceful shutdown", file=sys.stderr)
+    # 正常終了・中断のいずれでも安全停止: 未約定の打診指値を取消し残玉を手仕舞う
+    # (停止後にブローカーへ孤児注文を残さない。デモのニュース前停止が安全になる)。
+    closed = runner.shutdown()
+    if closed:
+        print(f"shutdown: cancelled/closed {len(closed)} position(s): {closed}")
+    return 0
 
 
 def run_export(args: argparse.Namespace) -> int:
@@ -594,7 +654,8 @@ def run_export(args: argparse.Namespace) -> int:
     spec = SYMBOLS[args.symbol]
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=365 * args.years)
-    with MT5Feed(terminal_path=args.terminal_path) as feed:
+    with MT5Feed(terminal_path=args.terminal_path,
+                 server_utc_offset=_server_offset(args)) as feed:
         count = export_history(feed, spec, Timeframe(args.tf), start, end, args.data)
     print(f"exported {count} candles -> {args.data}")
     return 0
