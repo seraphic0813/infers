@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,6 +27,55 @@ from infers.execution.sim_broker import BrokerEvent
 from infers.execution.sm import FsmConfig, PositionFSM, PosState
 
 _HOLDING_STATES = (PosState.PROBE, PosState.ADD, PosState.SL_AT_BE, PosState.RUNNER)
+
+# MT5 の注文コメント上限 (超過すると order_send がターミナルへ届く前に失敗する)。
+MT5_COMMENT_MAX = 31
+_PID_KEY_LEN = 10
+
+# 新規建て (未保有の position_id に対する発注)。失敗しても見送りで済む操作。
+_ENTRY_OPS = frozenset({"place_limit", "place_market"})
+
+
+def pid_key(position_id: str) -> str:
+    """position_id → 注文コメント用の短い決定論キー (16進のため '/' を含まない)。"""
+    return hashlib.sha1(position_id.encode("utf-8")).hexdigest()[:_PID_KEY_LEN]
+
+
+def order_comment(client_order_id: str, position_id: str) -> str:
+    """client_order_id を MT5 コメント上限 (31文字) 内の決定論文字列へ写す。
+
+    形式は 'key/seq/tag' (key = pid_key(position_id))。pid 部を短縮するだけなので
+    poll_events の '/probe_limit' 判定はそのまま効く。
+    """
+    if client_order_id.startswith(position_id):
+        suffix = client_order_id[len(position_id):]
+    else:
+        suffix = "/" + hashlib.sha1(client_order_id.encode("utf-8")).hexdigest()[:8]
+    return (pid_key(position_id) + suffix)[:MT5_COMMENT_MAX]
+
+
+class OrderRejected(FeedError):
+    """order_send が成功コードを返さなかった (発注・変更・取消のいずれか)。
+
+    LiveRunner が捕捉し、新規建てなら ORDER_REJECT として見送り、
+    防御側 (決済・SL変更・取消・既存玉への追加) ならキルスイッチを作動する。
+    """
+
+    def __init__(self, *, op: str, client_order_id: str | None,
+                 position_id: str | None, retcode: int | None,
+                 last_error: object, comment: str | None) -> None:
+        self.op = op
+        self.client_order_id = client_order_id
+        self.position_id = position_id
+        self.retcode = retcode
+        self.last_error = last_error
+        self.comment = comment
+        super().__init__(f"order_send failed ({op}): retcode={retcode} {last_error}")
+
+    def to_dict(self) -> dict:
+        return {"op": self.op, "client_order_id": self.client_order_id,
+                "position_id": self.position_id, "retcode": self.retcode,
+                "last_error": str(self.last_error), "comment": self.comment}
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +191,8 @@ class MT5LiveBroker:
         self._seen: set[str] = set()
         self._tickets: dict[str, int] = {}          # client_order_id → ticket
         self._position_tickets: dict[str, int] = {}  # position_id → ticket
+        self._pid_by_key: dict[str, str] = {}       # pid_key → position_id (コメント復元用)
+        self._pid_by_order: dict[int, str] = {}     # 指値の order ticket → position_id
         self._last_poll = datetime.now(timezone.utc)
 
     def connect(self, *, terminal_path: str | None = None) -> None:
@@ -189,13 +241,41 @@ class MT5LiveBroker:
     def _lots(self, steps: int) -> float:
         return float(steps * self.spec.lot_step)
 
-    def _send(self, request: dict) -> Any:
+    def _success_codes(self, action: int) -> frozenset[int]:
+        """アクション別の成功 retcode。指値の成功は PLACED(10008) であり DONE ではない。"""
+        mt5 = self._require()
+        done = mt5.TRADE_RETCODE_DONE
+        placed = getattr(mt5, "TRADE_RETCODE_PLACED", 10008)
+        partial = getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010)
+        no_changes = getattr(mt5, "TRADE_RETCODE_NO_CHANGES", 10025)
+        if action == mt5.TRADE_ACTION_PENDING:
+            return frozenset({placed, done})
+        if action == mt5.TRADE_ACTION_DEAL:
+            # 部分約定でも建玉は実在する (数量ズレはリコンサイルが検出する)
+            return frozenset({done, partial})
+        if action == mt5.TRADE_ACTION_SLTP:
+            return frozenset({done, no_changes})   # 同値SLへの変更は NO_CHANGES
+        return frozenset({done})
+
+    def _send(self, request: dict, *, op: str, client_order_id: str | None = None,
+              position_id: str | None = None) -> Any:
         mt5 = self._require()
         result = mt5.order_send(request)
-        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            raise FeedError(f"order_send failed: {getattr(result, 'retcode', None)} "
-                            f"{mt5.last_error()}")
+        retcode = getattr(result, "retcode", None)
+        if result is None or retcode not in self._success_codes(request["action"]):
+            raise OrderRejected(op=op, client_order_id=client_order_id,
+                                position_id=position_id, retcode=retcode,
+                                last_error=mt5.last_error(),
+                                comment=request.get("comment"))
         return result
+
+    def _comment(self, client_order_id: str, position_id: str) -> str:
+        self._pid_by_key[pid_key(position_id)] = position_id
+        return order_comment(client_order_id, position_id)
+
+    def _pid_from_comment(self, comment: str) -> str:
+        key = (comment or "").split("/", 1)[0]
+        return self._pid_by_key.get(key, key)
 
     # -- BrokerPort 実装 ----------------------------------------------------------
 
@@ -213,14 +293,17 @@ class MT5LiveBroker:
             "sl": self._price(sl_int),
             "deviation": self.deviation,
             "magic": self.magic,
-            "comment": client_order_id,             # 冪等キーをブローカー側にも残す
+            # 冪等キーをブローカー側にも残す (31文字上限に収まる短縮形)
+            "comment": self._comment(client_order_id, position_id),
             "type_time": mt5.ORDER_TIME_GTC,
         }
         if self._filling_mode is not None:
             req["type_filling"] = self._filling_mode
-        result = self._send(req)
+        result = self._send(req, op="place_limit", client_order_id=client_order_id,
+                            position_id=position_id)
         self._seen.add(client_order_id)
         self._tickets[client_order_id] = result.order
+        self._pid_by_order[result.order] = position_id
 
     def place_market(self, *, client_order_id: str, position_id: str, direction: int,
                      volume_steps: int, sl_int: int) -> int:
@@ -235,11 +318,12 @@ class MT5LiveBroker:
             "sl": self._price(sl_int),
             "deviation": self.deviation,
             "magic": self.magic,
-            "comment": client_order_id,
+            "comment": self._comment(client_order_id, position_id),
         }
         if self._filling_mode is not None:
             req["type_filling"] = self._filling_mode
-        result = self._send(req)
+        result = self._send(req, op="place_market", client_order_id=client_order_id,
+                            position_id=position_id)
         self._seen.add(client_order_id)
         self._position_tickets.setdefault(position_id, result.order)
         return self.spec.float_to_ticks(result.price)
@@ -254,7 +338,7 @@ class MT5LiveBroker:
             "symbol": self.spec.name,
             "position": ticket,
             "sl": self._price(new_sl_int),
-        })
+        }, op="modify_sl", position_id=position_id)
 
     def close_volume(self, *, client_order_id: str, position_id: str,
                      volume_steps: int) -> int:
@@ -276,11 +360,12 @@ class MT5LiveBroker:
             "position": ticket,
             "deviation": self.deviation,
             "magic": self.magic,
-            "comment": client_order_id,
+            "comment": self._comment(client_order_id, position_id),
         }
         if self._filling_mode is not None:
             req["type_filling"] = self._filling_mode
-        result = self._send(req)
+        result = self._send(req, op="close_volume", client_order_id=client_order_id,
+                            position_id=position_id)
         self._seen.add(client_order_id)
         return self.spec.float_to_ticks(result.price)
 
@@ -289,7 +374,9 @@ class MT5LiveBroker:
         if ticket is None:
             return
         mt5 = self._require()
-        self._send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
+        self._send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket},
+                   op="cancel", client_order_id=client_order_id,
+                   position_id=self._pid_by_order.get(ticket))
 
     # -- 約定イベントの取得 --------------------------------------------------------
 
@@ -304,7 +391,11 @@ class MT5LiveBroker:
         for pos in (mt5.positions_get(symbol=self.spec.name) or []):
             if pos.magic != self.magic:
                 continue
-            pid = (pos.comment or "").split("/", 1)[0]
+            # 既知チケットを優先 (ブローカーがコメントを保持しない場合もある)。
+            # 次いでコメントのキーを既知の position_id へ戻す。未知ならキーのまま
+            # (= orphan として報告される)。
+            pid = next((p for p, t in self._position_tickets.items()
+                        if t == pos.ticket), "") or self._pid_from_comment(pos.comment)
             if not pid:
                 continue
             self._position_tickets.setdefault(pid, pos.ticket)
@@ -317,7 +408,8 @@ class MT5LiveBroker:
         for order in (mt5.orders_get(symbol=self.spec.name) or []):
             if order.magic != self.magic:
                 continue
-            pid = (order.comment or "").split("/", 1)[0]
+            pid = self._pid_by_order.get(order.ticket) or self._pid_from_comment(
+                order.comment)
             if pid:
                 pending.add(pid)
                 self._tickets.setdefault(order.comment, order.ticket)
@@ -368,8 +460,9 @@ class MT5LiveBroker:
             comment = deal.comment or ""
             price_int = self.spec.float_to_ticks(deal.price)
             volume_steps = int(round(deal.volume / float(self.spec.lot_step)))
-            if deal.entry == mt5.DEAL_ENTRY_IN and "/probe_limit" in comment:
-                position_id = comment.split("/", 1)[0]
+            filled_limit = self._pid_by_order.get(getattr(deal, "order", None))
+            if deal.entry == mt5.DEAL_ENTRY_IN and (filled_limit or "/probe_limit" in comment):
+                position_id = filled_limit or self._pid_from_comment(comment)
                 self._position_tickets.setdefault(position_id, deal.position_id)
                 events.append(BrokerEvent(kind="FILL", client_order_id=comment,
                                           position_id=position_id,
@@ -424,6 +517,7 @@ class LiveRunner:
         volume_sizer=None,                        # VolumeSizer | None
         execution_factory: "Callable[..., ExecutionModel] | None" = None,
         heartbeat_interval_s: float = 300.0,       # 無音検知用ハートビート間隔(改善プランT13。0で無効)
+        journal_eval: bool = False,               # 毎バーの評価結果をEVALとして記録(可視化。既定OFF)
     ) -> None:
         self._feed = feed
         self._spec = spec
@@ -435,6 +529,7 @@ class LiveRunner:
         self._spread_fn = spread_fn or broker.current_spread_ticks
         self._heartbeat_interval_s = heartbeat_interval_s
         self._journal = journal
+        self._journal_eval = journal_eval
         # ライブ EquityProvider: MT5LiveBroker が equity() を実装しているので直接注入。
         equity_prov = broker if volume_sizer is not None else None
         self.loop = TradingLoop(broker=broker, gateway=gateway,
@@ -454,6 +549,12 @@ class LiveRunner:
         # キルスイッチ作動の一過性検知 (改善プランT12): False→True遷移した瞬間のみ
         # 1回だけジャーナルへ記録する (毎バー同じイベントを重複記録しないため)。
         self._kill_switch_journaled = False
+        # フィード停止検知: 最後に処理した確定足の close_time と、停止を記録済みか。
+        # ハートビートスレッドは MT5 API を呼ばず、これらとフィードの
+        # last_activity_utc (フィード側スレッドが更新) だけを読む。
+        self._last_bar_close: datetime | None = None
+        self._started_at: datetime | None = None
+        self._feed_stale = False
 
     def reconcile(self, *, reason: str = "startup") -> ReconcileReport:
         """ローカル状態機械とブローカー実態の強制同期 (起動時・再接続時・定期)。
@@ -553,6 +654,7 @@ class LiveRunner:
         リコンサイル (フェーズ8 #6): 起動時に加え、再接続復帰直後 (新規判断の前) と
         一定本数ごとに状態を再同期し「リコンサイル不一致ゼロ」を維持する。
         """
+        self._started_at = datetime.now(timezone.utc)
         warm_until = self._warm_provider()
         self._maybe_reconcile("startup")
         self._maybe_journal_kill_switch()
@@ -568,18 +670,38 @@ class LiveRunner:
                 seen = getattr(self._feed, "reconnect_count", 0)
                 if seen != self._last_reconnect_seen:
                     self._last_reconnect_seen = seen
-                    self._maybe_reconcile("post-reconnect")
+                    self._guarded(lambda: self._maybe_reconcile("post-reconnect"))
 
-                self.loop.on_broker_events(self._event_source(candle))
+                self._guarded(lambda: self.loop.on_broker_events(self._event_source(candle)))
                 output = self._provider.on_candle(candle)
-                self.loop.on_candle(candle, output, spread_ticks=self._spread_fn())
+                self._guarded(lambda: self.loop.on_candle(
+                    candle, output, spread_ticks=self._spread_fn()))
+                self._last_bar_close = candle.close_time
+                if self._feed_stale and self._journal is not None:
+                    self._feed_stale = False
+                    self._journal.record("FEED_RESUMED", {
+                        "bar_close": candle.close_time.isoformat()})
+                # 可視化(改善: 沈黙の中身): 毎バーの評価結果=どのゲートで見送りに
+                # なったか(プランを出したバーは "signal")を EVAL として記録する。
+                # ゲートなし手法(--ai-client none)は VERDICT を残さないため、
+                # 本フラグがエントリー未発生時の唯一の per-bar 可観測性になる。
+                # 取引ロジックには一切関与しない純粋な追記(loop.on_candle 後に置くのは
+                # ジャーナルの bar_time が当足へ設定済みになるため)。
+                if self._journal_eval and self._journal is not None:
+                    reason = getattr(output, "reject_reason", None)
+                    n_plans = len(getattr(output, "plans", []) or [])
+                    self._journal.record("EVAL", {
+                        "reason": reason if reason is not None
+                        else ("signal" if n_plans else "unknown"),
+                        "n_plans": n_plans,
+                    })
                 bars += 1
 
                 # 定期リコンサイル (安全網: あらゆる原因のズレを上限間隔内に検出)
                 self._bars_since_reconcile += 1
                 if (self._reconcile_every_bars
                         and self._bars_since_reconcile >= self._reconcile_every_bars):
-                    self._maybe_reconcile("periodic")
+                    self._guarded(lambda: self._maybe_reconcile("periodic"))
                 self._maybe_journal_kill_switch()
 
                 if max_bars is not None and bars >= max_bars:
@@ -604,11 +726,74 @@ class LiveRunner:
 
         def _loop() -> None:
             while not stop_event.wait(self._heartbeat_interval_s):
-                self._journal.record("HEARTBEAT", {})
+                self._heartbeat_tick(datetime.now(timezone.utc))
 
         thread = threading.Thread(target=_loop, daemon=True, name="infers-heartbeat")
         thread.start()
         return stop_event, thread
+
+    def _heartbeat_tick(self, now: datetime) -> None:
+        """HEARTBEAT に確定足の遅延を載せ、フィード停止を一度だけ FEED_STALE として記録する。
+
+        停止の判定: 市場は動いている (フィードが直近 3×TF 以内に価格変化を観測) のに、
+        最後の確定足 (未処理なら起動時刻) から 3×TF を超えて新しい確定足が来ない。
+        週末など市場が止まっている間は価格変化が無いので誤報しない。
+        記録のみで自動アクションはしない (T12 の口座横断モニタと同じ方針)。
+        """
+        threshold = self._tf.duration * 3
+        ref = self._last_bar_close or self._started_at
+        lag_s = int((now - ref).total_seconds()) if ref is not None else None
+        activity = getattr(self._feed, "last_activity_utc", None)
+        self._journal.record("HEARTBEAT", {
+            "last_bar_close": (self._last_bar_close.isoformat()
+                               if self._last_bar_close else None),
+            "lag_s": lag_s,
+            "feed_active_at": activity.isoformat() if activity else None,
+            "offset_pending": bool(getattr(self._feed, "offset_pending", False)),
+        })
+        market_active = activity is not None and now - activity <= threshold
+        if (ref is not None and now - ref > threshold and market_active
+                and not self._feed_stale):
+            self._feed_stale = True
+            self._journal.record("FEED_STALE", {
+                "last_bar_close": (self._last_bar_close.isoformat()
+                                   if self._last_bar_close else None),
+                "lag_s": lag_s,
+                "feed_active_at": activity.isoformat(),
+            })
+
+    def _guarded(self, step: Callable[[], object]) -> None:
+        """発注失敗 (OrderRejected) でプロセスを落とさない (ライブ層のみの安全網)。
+
+        - 新規建て (未保有 position_id への place_*) の失敗: ORDER_REJECT を記録して見送る。
+          TradingLoop は place 成功後にのみ建玉登録するため、状態は汚れない。
+        - それ以外 (決済・SL変更・取消・既存玉への追加): ローカルとブローカーの整合が
+          保証できないため ORDER_ERROR を記録し、キルスイッチ (新規停止) +リコンサイル。
+        バックテストの SimBroker は OrderRejected を出さないので、depth50 経路は不変。
+        """
+        try:
+            step()
+        except OrderRejected as e:
+            data = e.to_dict()
+            entry = e.op in _ENTRY_OPS and e.position_id not in self.loop.open_positions
+            if entry:
+                if self._journal is not None:
+                    self._journal.record("ORDER_REJECT", data)
+                # 自己ミラー式の単一ポジション制約を持つ手法は、発注していない建玉を
+                # 保有中と見なし続けるため、建玉ゼロならフラットへ戻す (汎用フック)。
+                reset_mirror = getattr(self._provider, "reset_position_mirror", None)
+                if reset_mirror is not None and not self.loop.open_positions:
+                    reset_mirror()
+                return
+            if self._journal is not None:
+                self._journal.record("ORDER_ERROR", data)
+            self._risk.engage_kill_switch(f"ORDER_ERROR: {e}")
+            try:
+                self._maybe_reconcile("post-order-error")
+            except Exception as e2:             # noqa: BLE001 — 記録して稼働を続ける
+                if self._journal is not None:
+                    self._journal.record("RECONCILE_ERROR", {
+                        "error": f"{type(e2).__name__}: {e2}"})
 
     def shutdown(self, reason: str = "SHUTDOWN") -> list[str]:
         """未約定指値の取消と残玉の手仕舞い (常駐停止時)。"""

@@ -55,6 +55,9 @@ class AtrTrendPlan:
     w1_low_int: int = 0
     fib_levels: tuple[int, ...] = ()
     sr_zones: tuple[tuple[int, int], ...] = ()
+    # -- v1.2 ステージ⑤-A: 段階式トレール(既定OFF。spec.md §17) --
+    trail_stage2_trigger_int: int = 0     # 0=無効。エントリーからの利益ティック閾値
+    trail_stage2_distance_ticks: int = 0  # ステージ2トレール幅(ティック)
 
 
 @dataclass
@@ -68,3 +71,8 @@ class AtrTrendOutput:
     ema_trend: Decimal | None = None      # EMA50 (M15・上位足)
     atr: Decimal | None = None            # ATR14 (M5)
     vol_sma: Decimal | None = None        # 出来高SMA20 (M5)
+    # 可視化用: そのバーがどのゲートで見送りになったかの理由コード
+    # (プランを出したバーは "signal")。取引ロジックには一切影響しない純粋な注釈。
+    # --journal-eval 有効時に LiveRunner が EVAL イベントとしてジャーナルへ記録し、
+    # tools/eval_funnel.py が「沈黙の中身」(どのゲートで何%止まったか)を集計する。
+    reject_reason: str | None = None

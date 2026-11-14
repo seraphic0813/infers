@@ -95,6 +95,13 @@ class _ShortIntent:
     volume_steps = 2
 
 
+class _LongIntentStage2(_LongIntent):
+    # v1.2 ステージ⑤-A: TP2 を遠くへ(1200)し、トレールのみで検証できるようにする。
+    fib_target_int = 1200
+    trail_stage2_trigger_int = 30    # 含み益が entry+30 に到達でステージ2へ
+    trail_stage2_distance_ticks = 25  # ステージ1(10)より広い
+
+
 class TestAtrTrendExecution:
     def _broker(self) -> SimBroker:
         b = SimBroker(spread_ticks=2, min_stop_distance_ticks=5)
@@ -214,6 +221,61 @@ class TestAtrTrendExecution:
         with pytest.raises(ValueError):
             AtrTrendExecution(position_id="e10", direction=0, broker=self._broker())
 
+    # -- v1.2 ステージ⑤-A: 段階式トレール ------------------------------------------
+
+    def test_stage2_trail_uses_wider_width_after_trigger(self):
+        broker = self._broker()
+        ex = AtrTrendExecution(position_id="e11", direction=+1, broker=broker)
+        ex.place(_LongIntentStage2())
+
+        b1 = mk5(1, 1025, 1010, 1022)   # TP1到達→RUNNER・建値化・トレール(幅10)
+        broker.process_bar(b1)
+        ex.on_bar(b1, None)
+        assert ex.state is AtrState.RUNNER
+        assert ex.sl_int == 1015                       # 1025 - 10(ステージ1幅)
+        assert all(n != "TRAIL_STAGE2" for n, _ in ex.journal)   # まだ未到達(<1032)
+
+        b2 = mk5(2, 1033, 1020, 1030)   # 含み益 entry(1002)+30=1032 に到達 → ステージ2発動
+        broker.process_bar(b2)
+        ex.on_bar(b2, None)
+        assert any(n == "TRAIL_STAGE2" for n, _ in ex.journal)
+        assert ex.sl_int == 1015        # 幅25の目標(1033-25=1008)は現SLより手前 → no-op
+
+        b3 = mk5(3, 1060, 1050, 1055)   # ステージ2幅(25)でのトレール前進を確認
+        broker.process_bar(b3)
+        ex.on_bar(b3, None)
+        assert ex.sl_int == 1035        # 1060 - 25(ステージ2幅)。幅10なら1050になるはず
+
+    def test_stage2_trail_latches_and_does_not_revert(self):
+        broker = self._broker()
+        ex = AtrTrendExecution(position_id="e12", direction=+1, broker=broker)
+        ex.place(_LongIntentStage2())
+
+        for bar in (mk5(1, 1025, 1010, 1022),   # RUNNER化・幅10
+                    mk5(2, 1033, 1020, 1030),    # ステージ2発動(no-op)
+                    mk5(3, 1060, 1050, 1055)):   # 幅25で前進 → sl=1035
+            broker.process_bar(bar)
+            ex.on_bar(bar, None)
+        assert ex.sl_int == 1035
+
+        # 押し目(高値1050): 幅10へ戻っていれば 1050-10=1040 > 1035 で前進するはずだが、
+        # ラッチにより幅25のまま(1050-25=1025 <= 1035)で no-op のはず。
+        b4 = mk5(4, 1050, 1010, 1030)
+        broker.process_bar(b4)
+        ex.on_bar(b4, None)
+        assert ex.sl_int == 1035   # 幅10へ戻っていれば1040になってしまう(ラッチ違反)
+
+    def test_stage2_trail_off_by_default_matches_v11(self):
+        # trail_stage2_trigger_int=0(既定)なら単一幅トレールのまま(v1.1挙動不変)。
+        broker = self._broker()
+        ex = AtrTrendExecution(position_id="e13", direction=+1, broker=broker)
+        ex.place(_LongIntent())
+        b1 = mk5(1, 1025, 1010, 1022)
+        broker.process_bar(b1)
+        ex.on_bar(b1, None)
+        assert ex.sl_int == 1015
+        assert all(n != "TRAIL_STAGE2" for n, _ in ex.journal)
+
 
 @pytest.mark.property
 @settings(max_examples=200, deadline=None)
@@ -242,6 +304,47 @@ def test_advance_sl_to_never_retreats(direction, targets):
         cur = ex.sl_int
         assert ex._profit_side(cur, prev) >= 0
         prev = cur
+
+
+@pytest.mark.property
+@settings(max_examples=200, deadline=None)
+@given(
+    direction=st.sampled_from([+1, -1]),
+    touches=st.lists(st.integers(min_value=900_000, max_value=1_400_000),
+                     min_size=1, max_size=30),
+)
+def test_staged_trail_never_retreats_through_on_bar(direction, touches):
+    """spec.md §17(v1.2ステージ⑤-A): 段階トレールの切替を含む on_bar 経路でも
+    SLは利益方向にしか動かない(ランダムな高値/安値列でステージ切替が起きても)。"""
+    broker = SimBroker(spread_ticks=2, min_stop_distance_ticks=0)
+    broker.process_bar(mk5(0, 1_010_000, 990_000, 1_000_000))
+    ex = AtrTrendExecution(position_id="propstage2", direction=direction, broker=broker)
+    intent = SimpleNamespace(
+        plan_id="p", direction=direction,
+        limit_price_int=1_000_000,
+        sl_int=1_000_000 - direction * 500_000,
+        tp1_int=1_000_000 + direction * 1_000,          # ほぼ即TP1到達 → RUNNERへ
+        fib_target_int=1_000_000 + direction * 50_000_000,   # 到達させない遠いTP2
+        trail_distance_ticks=20_000, volume_steps=2,
+        trail_stage2_trigger_int=30_000, trail_stage2_distance_ticks=60_000)
+    ex.place(intent)
+
+    def bar_for(i: int, touch: int) -> Candle:
+        if direction > 0:
+            return mk5(i, touch, touch - 100_000, touch - 50_000)
+        return mk5(i, touch + 100_000, touch, touch + 50_000)
+
+    prev_sl = ex.sl_int
+    for i, touch in enumerate(touches, start=1):
+        bar = bar_for(i, touch)
+        for e in broker.process_bar(bar):
+            ex.on_broker_event(e)
+        if ex.closed:
+            break
+        ex.on_bar(bar, None)
+        if ex.sl_int is not None:
+            assert ex._profit_side(ex.sl_int, prev_sl) >= 0
+            prev_sl = ex.sl_int
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +421,62 @@ class TestAtrTrendScalpProvider:
         out = p.on_candle(mk5(9, 1140, 1130, 1135, vol=100))
         assert out.plans == []
 
+    def test_vol_mult_max_blocks_spike_volume(self):
+        # v1.2 ステージ①(スパイク足フィルター案1): 既定OFFでは出るプランが
+        # vol_mult_max 設定時に出来高スパイク足として遮断されること。
+        # vol_sma は当足も window に含む(SMA.update が現在値ごと平均を返す)ため、
+        # vol_sma_period=5 にして直近5本(100,100,100,100,500)の平均=180で検証する
+        # (閾値 = 2.5 * 180 = 450 < 500)。
+        p = make_provider(vol_mult_max=Decimal("2.5"), vol_sma_period=5)
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=500))
+        assert out.plans == []
+
+    def test_vol_mult_max_off_by_default_does_not_block(self):
+        p = make_provider()   # vol_mult_max 既定 0 = 無効
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=300))
+        assert len(out.plans) == 1
+
+    def test_range_atr_mult_max_blocks_wide_range(self):
+        # v1.2 ステージ①(スパイク足フィルター案2): レンジが ATR の倍数を超える
+        # 足(このシナリオでは range=160, atr≒87.98 → 比≒1.82)は遮断される。
+        p = make_provider(range_atr_mult_max=Decimal("1.5"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert out.plans == []
+
+    def test_range_atr_mult_max_off_by_default_does_not_block(self):
+        p = make_provider()   # range_atr_mult_max 既定 0 = 無効
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+
+    def test_atr_floor_bps_blocks_low_relative_volatility(self):
+        # v1.2 ステージ③(相対ボラフロア): このシナリオの ATR/価格比は約775bps
+        # (atr≒87.98, c_int=1135)。閾値800にすると比が下回り遮断される。
+        p = make_provider(atr_floor_bps=Decimal("800"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert out.plans == []
+
+    def test_atr_floor_bps_below_threshold_does_not_block(self):
+        # 同じシナリオで閾値700(実比775bpsより低い)なら遮断されない。
+        p = make_provider(atr_floor_bps=Decimal("700"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+
+    def test_atr_floor_bps_explicit_zero_disables(self):
+        # v1.2 ステージ③採用により既定値は5.0(spec.md §15)。明示的に0を渡せば
+        # 無効化されることを確認する(このシナリオの実比775bpsは既定5.0では
+        # 遮断されないほど大きいため、既定値のままでも本テストの意図は成立するが、
+        # 「0で無効化できる」契約自体を明示的に検証する)。
+        p = make_provider(atr_floor_bps=Decimal("0"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+
     def test_suppresses_new_plan_while_position_open(self):
         p = make_provider()
         _warm_long_setup(p)
@@ -342,6 +501,65 @@ class TestAtrTrendScalpProvider:
         out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
         assert out.plans == []
 
+    # -- reject_reason 可視化注釈(取引ロジックには影響しない。--journal-eval 用) --
+
+    def test_reject_reason_warmup(self):
+        p = make_provider()
+        out = p.on_candle(mk5(0, 1010, 990, 1000))
+        assert out.plans == []
+        assert out.reject_reason == "warmup"
+
+    def test_reject_reason_signal_on_emit(self):
+        p = make_provider()
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+        assert out.reject_reason == "signal"
+
+    def test_reject_reason_no_direction_on_bias_momentum_conflict(self):
+        # 上昇でウォームアップ(上位足バイアス+1)後、短期だけ急落させると
+        # 短期モメンタム(EMA9<EMA21)と上位足バイアス(+1)が食い違い、方向不成立。
+        p = make_provider()
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1010, 890, 900, vol=100))
+        assert out.plans == []
+        assert out.reject_reason == "no_direction"
+
+    def test_reject_reason_no_retrace(self):
+        p = make_provider()
+        _warm_long_setup(p)
+        # 押し目タッチ無し(安値がEMA21を下抜けない)→ no_retrace で見送り。
+        out = p.on_candle(mk5(9, 1140, 1130, 1135, vol=100))
+        assert out.plans == []
+        assert out.reject_reason == "no_retrace"
+
+    def test_reject_reason_volume_filter(self):
+        p = make_provider(vol_mult=Decimal("5"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert out.plans == []
+        assert out.reject_reason == "volume_filter"
+
+    def test_reject_reason_out_of_session(self):
+        p = make_provider(session_filter=True)   # T0=UTC00:00 は窓外
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert out.plans == []
+        assert out.reject_reason == "out_of_session"
+
+    def test_reject_reason_position_open(self):
+        p = make_provider()
+        _warm_long_setup(p)
+        p.on_candle(mk5(9, 1140, 980, 1135, vol=100))       # 建玉(ミラー)
+        out = p.on_candle(mk5(10, 1160, 1120, 1155, vol=100))
+        assert out.plans == []
+        assert out.reject_reason == "position_open"
+
+    def test_reject_reason_default_none(self):
+        # 注釈は既定 None(理由を設定しない出力経路が無いことの回帰保護)。
+        from infers.strategies.atr_trend_scalp.signals import AtrTrendOutput
+        assert AtrTrendOutput().reject_reason is None
+
     def test_constructor_validates(self):
         with pytest.raises(ValueError):
             make_provider(min_stop_distance_ticks=0)
@@ -349,6 +567,46 @@ class TestAtrTrendScalpProvider:
             make_provider(volume_steps=0)
         with pytest.raises(ValueError):
             make_provider(tp1_atr_mult=Decimal(3), tp2_atr_mult=Decimal(2))
+        with pytest.raises(ValueError):
+            # vol_mult_max は 0 か vol_mult(既定0.5)より大きい必要がある。
+            make_provider(vol_mult_max=Decimal("0.3"))
+        with pytest.raises(ValueError):
+            make_provider(range_atr_mult_max=Decimal("-1"))
+        with pytest.raises(ValueError):
+            make_provider(atr_floor_bps=Decimal("-1"))
+        with pytest.raises(ValueError):
+            make_provider(trail_stage2_trigger_atr_mult=Decimal("-1"))
+        with pytest.raises(ValueError):
+            # trigger>0 のとき trail_stage2_atr_mult は必須(既定0のまま=不正)。
+            make_provider(trail_stage2_trigger_atr_mult=Decimal("1.5"))
+        with pytest.raises(ValueError):
+            # trail_stage2_atr_mult は trail_atr_mult(既定0.15)より大きい必要がある。
+            make_provider(trail_stage2_trigger_atr_mult=Decimal("1.5"),
+                          trail_stage2_atr_mult=Decimal("0.1"))
+        with pytest.raises(ValueError):
+            # trigger=0(既定)のまま distance だけ指定するのは不正。
+            make_provider(trail_stage2_atr_mult=Decimal("0.5"))
+
+    def test_stage2_trail_geometry_baked_into_plan(self):
+        p = make_provider(trail_stage2_trigger_atr_mult=Decimal("1.5"),
+                          trail_stage2_atr_mult=Decimal("0.5"))
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+        plan = out.plans[0]
+        # atr_at_entry_int(88) × 1.5 ≒ 132 / × 0.5 ≒ 44(ATR固定・整数丸め)。
+        assert plan.trail_stage2_trigger_int == round(plan.atr_at_entry_int * 1.5)
+        assert plan.trail_stage2_distance_ticks == max(
+            1, round(plan.atr_at_entry_int * 0.5))
+
+    def test_stage2_trail_off_by_default_zero_fields(self):
+        p = make_provider()   # trail_stage2_trigger_atr_mult 既定 0 = 無効
+        _warm_long_setup(p)
+        out = p.on_candle(mk5(9, 1140, 980, 1135, vol=100))
+        assert len(out.plans) == 1
+        plan = out.plans[0]
+        assert plan.trail_stage2_trigger_int == 0
+        assert plan.trail_stage2_distance_ticks == 0
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +621,27 @@ class TestRegistryWiring:
         assert spec.report_spec is not None
         prov = spec.build(symbol="XAUUSD", tf=Timeframe.M5)
         assert isinstance(prov, AtrTrendScalpProvider)
+
+    def test_v12_default_enables_atr_floor(self):
+        # 既定(atr_trend_scalp)は v1.2 = atr_floor_bps 5.0(相対ボラフロア有効)。
+        prov = get_strategy("atr_trend_scalp").build(symbol="XAUUSD", tf=Timeframe.M5)
+        assert prov._atr_floor_bps == Decimal("5.0")
+
+    def test_v11_preset_disables_atr_floor(self):
+        # v1.1 プリセットは atr_floor_bps=0(無効)。他は v1.2 と同一(執行・レポート共通)。
+        spec = get_strategy("atr_trend_scalp_v11")
+        assert spec.name == "atr_trend_scalp_v11"
+        assert spec.build_execution is get_strategy("atr_trend_scalp").build_execution
+        assert spec.report_spec is not None
+        prov = spec.build(symbol="XAUUSD", tf=Timeframe.M5)
+        assert isinstance(prov, AtrTrendScalpProvider)
+        assert prov._atr_floor_bps == Decimal("0")
+        # v1.1/v1.2 の差分は atr_floor_bps のみ(他パラメータは一致)。
+        v12 = get_strategy("atr_trend_scalp").build(symbol="XAUUSD", tf=Timeframe.M5)
+        assert prov._vol_mult == v12._vol_mult
+        assert prov._tp1_atr_mult == v12._tp1_atr_mult
+        assert prov._tp2_atr_mult == v12._tp2_atr_mult
+        assert prov._trail_atr_mult == v12._trail_atr_mult
 
 
 # ---------------------------------------------------------------------------
