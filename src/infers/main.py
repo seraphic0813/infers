@@ -287,9 +287,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--min-volume-steps", type=int, default=2,
                    help="--risk-pct 使用時の最低保証ロットステップ (既定2=Narrow Focus系の"
                         "半分利確が2step以上を要求するための下限)。"
-                        "半分利確を持たない手法(例: atr_trend_scalp)+小口座では、"
-                        "SL距離が広い足でリスク目標を大幅に超過する原因になるため 1 に"
-                        "下げられる (VolumeSizerConfig.min_volume_steps を直接上書き)")
+                        "半分利確を持たない手法+小口座では、SL距離が広い足でリスク目標を"
+                        "大幅に超過する原因になるため 1 に下げられる "
+                        "(VolumeSizerConfig.min_volume_steps を直接上書き)。"
+                        "atr_trend_scalp は TP1 で半玉利確するため 2 が必要 "
+                        "(1 だと分割できずバックテストと別の売買になる)")
     p.add_argument("--min-be-distance", type=int, default=None,
                    help="建値SL移動を許可する最小スイング距離 (ticks)。"
                         "省略時は既定値(10 ticks=$0.10)。"
