@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -89,18 +90,27 @@ def compare_to_golden(parsed: ParsedBacktest) -> list[str]:
     return diffs
 
 
+def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+    """子プロセスの出力を UTF-8 に固定して読む。
+
+    既定(text=True のみ)では Windows のロケール(cp932)で復号され、子の出力に
+    cp932 で復号できないバイトが混じると読み取りスレッドが落ちて stdout が None になり、
+    検証結果を判定できないまま失敗していた(2026-11 に2回発生)。
+    """
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", env=env)
+
+
 def run_pytest() -> tuple[bool, str]:
-    proc = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q"],
-        capture_output=True, text=True,
-    )
-    output = proc.stdout + proc.stderr
+    proc = _run([sys.executable, "-m", "pytest", "-q"])
+    output = (proc.stdout or "") + (proc.stderr or "")
     return proc.returncode == 0, output
 
 
 def run_depth50_backtest() -> tuple[bool, str]:
-    proc = subprocess.run(DEPTH50_CMD, capture_output=True, text=True)
-    output = proc.stdout + proc.stderr
+    proc = _run(DEPTH50_CMD)
+    output = (proc.stdout or "") + (proc.stderr or "")
     return proc.returncode == 0, output
 
 
