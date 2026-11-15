@@ -80,9 +80,16 @@ class _PositionMirror:
     def _profit_side(self, a: int, b: int) -> int:
         return self.direction * (a - b)
 
-    def _advance_sl(self, target: int) -> None:
+    def _advance_sl(self, target: int, close_int: int) -> bool:
+        """SL前進。前進先が終値に達していれば成行決済扱いで True(= フラット)。
+
+        `AtrTrendExecution._protect_or_exit` と同じ規則(spec.md §19)。
+        """
         if self._profit_side(target, self.sl_int) > 0:
+            if self._profit_side(close_int, target) <= 0:
+                return True
             self.sl_int = target
+        return False
 
     def touched_exit(self, candle: Candle) -> bool:
         """この確定足で建玉が完全にフラットへ戻るなら True(ミラー解除)。"""
@@ -96,12 +103,14 @@ class _PositionMirror:
         # 2) TP1到達 → 建値化 + RUNNER化(初回のみ)。
         if not self.runner and self._profit_side(touch, self.tp1_int) >= 0:
             self.runner = True
-            self._advance_sl(self.entry_int)
+            if self._advance_sl(self.entry_int, candle.c_int):
+                return True
 
-        # 3) RUNNER: トレール前進 + TP2到達で全決済。
+        # 3) RUNNER: TP2到達で全決済。未到達ならトレール前進(終値に達していれば決済)。
         if self.runner:
-            self._advance_sl(touch - self.direction * self.trail_distance)
             if self._profit_side(touch, self.tp2_int) >= 0:
+                return True
+            if self._advance_sl(touch - self.direction * self.trail_distance, candle.c_int):
                 return True
         return False
 

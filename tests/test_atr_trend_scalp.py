@@ -221,6 +221,52 @@ class TestAtrTrendExecution:
         with pytest.raises(ValueError):
             AtrTrendExecution(position_id="e10", direction=0, broker=self._broker())
 
+    # -- SLが現在値を越える場合は成行決済(spec.md §19。2026-11-15) -----------------
+
+    def test_trail_beyond_close_exits_at_market_not_modify(self):
+        """回帰: TP1到達足が高値から大きく押して引けると、旧実装は終値より上に買いSLを
+        置き、バックテストは次足でそのSL価格ちょうどで約定させていた(現実には不可能)。"""
+        broker = self._broker()
+        ex = AtrTrendExecution(position_id="m1", direction=+1, broker=broker)
+        ex.place(_LongIntent())                        # entry 1002, trail 10
+        bar = mk5(1, 1030, 1010, 1012)                 # 高値1030→トレール先1020 > 終値1012
+        broker.process_bar(bar)
+        out = ex.on_bar(bar, None)
+        assert out.closed and ex.state is AtrState.CLOSED and ex.volume_steps == 0
+        assert ex.journal[-1][0] == "STOP_AT_MARKET"
+        assert ex.journal[-1][1]["market"] == 1012
+        assert all(not (n == "MOVE_SL" and p["new_sl"] >= 1012) for n, p in ex.journal)
+
+    def test_breakeven_beyond_close_exits_at_market(self):
+        """TP1到達足が建値割れで引けた場合、建値SLも置けないので成行決済する。"""
+        broker = self._broker()
+        ex = AtrTrendExecution(position_id="m2", direction=+1, broker=broker)
+        ex.place(_LongIntent())                        # entry 1002
+        bar = mk5(1, 1021, 990, 998)                   # TP1(1020)到達、終値998 < 建値
+        broker.process_bar(bar)
+        out = ex.on_bar(bar, None)
+        assert out.closed and ex.journal[-1][0] == "STOP_AT_MARKET"
+        assert [p["level"] for n, p in ex.journal if n == "TP_CLOSE"] == ["tp1"]
+
+    def test_short_trail_beyond_close_exits_at_market(self):
+        broker = self._broker()
+        ex = AtrTrendExecution(position_id="m3", direction=-1, broker=broker)
+        ex.place(_ShortIntent())                       # entry 998, trail 10
+        bar = mk5(1, 995, 970, 990)                    # 安値970→トレール先980 < 終値990
+        broker.process_bar(bar)
+        out = ex.on_bar(bar, None)
+        assert out.closed and ex.journal[-1][0] == "STOP_AT_MARKET"
+
+    def test_tp2_takes_precedence_over_trail_exit(self):
+        broker = self._broker()
+        ex = AtrTrendExecution(position_id="m4", direction=+1, broker=broker)
+        ex.place(_LongIntent())
+        b1 = mk5(1, 1025, 1012, 1022); broker.process_bar(b1); ex.on_bar(b1, None)
+        b2 = mk5(2, 1045, 1020, 1025)                  # TP2(1040)到達、終値はトレール先より下
+        broker.process_bar(b2)
+        out = ex.on_bar(b2, None)
+        assert out.closed and ex.journal[-1] == ("TP_CLOSE", {"level": "tp2", "state": "CLOSED"})
+
     # -- v1.2 ステージ⑤-A: 段階式トレール ------------------------------------------
 
     def test_stage2_trail_uses_wider_width_after_trigger(self):
@@ -307,6 +353,38 @@ def test_advance_sl_to_never_retreats(direction, targets):
 
 
 @pytest.mark.property
+@settings(max_examples=300, deadline=None)
+@given(
+    direction=st.sampled_from([+1, -1]),
+    bars=st.lists(st.tuples(st.integers(min_value=-300, max_value=300),   # 極値の位置
+                            st.integers(min_value=0, max_value=200)),    # 極値→終値の戻り
+                  min_size=1, max_size=40),
+)
+def test_live_sl_never_at_or_beyond_bar_close(direction, bars):
+    """spec.md §19: 確定足処理の後に建玉が残っているなら、SLは必ず終値より不利側にある
+    (= 現実のブローカーで置ける位置)。置けない位置になるなら成行決済されて CLOSED。"""
+    broker = SimBroker(spread_ticks=0, min_stop_distance_ticks=0)
+    broker.process_bar(mk5(0, 10_010, 9_990, 10_000))
+    ex = AtrTrendExecution(position_id="propmkt", direction=direction, broker=broker)
+    ex.place(SimpleNamespace(
+        plan_id="p", direction=direction, limit_price_int=10_000,
+        sl_int=10_000 - direction * 400, tp1_int=10_000 + direction * 40,
+        fib_target_int=10_000 + direction * 3_000, trail_distance_ticks=15, volume_steps=2))
+    for i, (ext_off, pullback) in enumerate(bars, start=1):
+        ext = 10_000 + direction * ext_off
+        close = ext - direction * pullback
+        hi, lo = (ext, close - 50) if direction > 0 else (close + 50, ext)
+        bar = mk5(i, hi, lo, close)
+        for e in broker.process_bar(bar):
+            ex.on_broker_event(e)
+        if ex.closed:
+            break
+        ex.on_bar(bar, None)
+        if not ex.closed:
+            assert ex._profit_side(close, ex.sl_int) > 0
+
+
+@pytest.mark.property
 @settings(max_examples=200, deadline=None)
 @given(
     direction=st.sampled_from([+1, -1]),
@@ -330,9 +408,11 @@ def test_staged_trail_never_retreats_through_on_bar(direction, touches):
     ex.place(intent)
 
     def bar_for(i: int, touch: int) -> Candle:
+        # 終値は極値から5,000(トレール幅20,000/60,000より小さい)。終値がトレール先を
+        # 割ると成行決済(spec.md §19)になりトレールを検証できないため、極値寄りで引ける足にする。
         if direction > 0:
-            return mk5(i, touch, touch - 100_000, touch - 50_000)
-        return mk5(i, touch + 100_000, touch, touch + 50_000)
+            return mk5(i, touch, touch - 100_000, touch - 5_000)
+        return mk5(i, touch + 100_000, touch, touch + 5_000)
 
     prev_sl = ex.sl_int
     for i, touch in enumerate(touches, start=1):

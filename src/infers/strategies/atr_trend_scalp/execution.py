@@ -10,6 +10,8 @@
                trail_stage2_trigger に到達すると trail_stage2_distance へ幅を
                切り替えるラッチ式2段トレールに対応。既定は単一幅=無効。spec.md §17)
                + TP2 到達で残玉全決済 → CLOSED
+  - 建値化・トレールの前進先が確定足終値に達している(=現実には置けないSL)場合は、
+    SLを置かずに残玉を成行決済して CLOSED(`STOP_AT_MARKET`。spec.md §19)。
   - on_broker_event(): ブローカーのSLヒットで CLOSED(初期SL/建値/トレールいずれでも)。
   - close(): 残玉を成行手仕舞い(データ末尾・シャットダウン)。
 
@@ -117,6 +119,30 @@ class AtrTrendExecution:
         if not candle.is_closed:
             raise ValueError("decisions only on closed bars (CLAUDE.md rule 2)")
 
+    def _protect_or_exit(self, target: int, market_int: int) -> bool:
+        """SLを target へ前進する。ただし target が現在値(確定足終値)に達している/越えて
+        いる場合は、SLを置かずに残玉を成行決済して CLOSED にする。戻り値: 決済したら True。
+
+        現実のブローカーでは、買いのSLを現在値以上(売りは以下)に置くことはできない
+        (MT5 は INVALID_STOPS で拒否する)。置けたとしても即座に発動し、約定は現在値になる。
+        旧実装は無条件に modify_sl し、バックテスト(SimBroker)は次の足で「SL価格ちょうど」で
+        約定させていたため、現在値より有利な約定を計上していた(2026-11-15 発見。spec.md §19)。
+        バックテストとライブの双方で「その場で成行決済」に揃える。
+        """
+        assert self._sl_int is not None
+        if self._profit_side(target, self._sl_int) <= 0:
+            return False                       # 改善でなければ何もしない(A-3)
+        if self._profit_side(market_int, target) <= 0:
+            self._broker.close_volume(
+                client_order_id=self._oid("stop_at_market"),
+                position_id=self.position_id, volume_steps=self._volume_steps)
+            self._volume_steps = 0
+            self._state = AtrState.CLOSED
+            self._log("STOP_AT_MARKET", target=target, market=market_int)
+            return True
+        self._advance_sl_to(target)
+        return False
+
     def _advance_sl_to(self, target: int) -> None:
         """SLを target へ前進する。利益方向への改善でなければ no-op(A-3 SL単調性)。
 
@@ -195,13 +221,24 @@ class AtrTrendExecution:
                                   runner=self._volume_steps)
                     self._state = AtrState.RUNNER
                     if self._entry_int is not None:
-                        self._advance_sl_to(self._entry_int)   # 建値化(利益方向のみ)
+                        # 建値化(利益方向のみ)。終値が建値を割っていれば成行決済。
+                        self._protect_or_exit(self._entry_int, candle.c_int)
 
-            # RUNNER: トレール(利益方向のみ)→ TP2 到達で残玉全決済。
+            # RUNNER: TP2 到達で残玉全決済。未到達ならトレール(利益方向のみ。
+            # トレール先が終値に達していれば成行決済)。TP2 の判定を先に行う(どちらも
+            # 終値での成行決済なので約定は同じ。決済理由を TP2 として記録するため)。
             # v1.2 ステージ⑤-A: 含み益が trail_stage2_trigger に到達したらトレール幅を
             # trail_stage2_distance へ切り替える(ラッチ。一度入ったら戻らない)。
             if self._state is AtrState.RUNNER:
                 assert self._tp2_int is not None and self._trail_distance is not None
+                if self._profit_side(touch, self._tp2_int) >= 0:
+                    self._broker.close_volume(
+                        client_order_id=self._oid("tp2_close"),
+                        position_id=self.position_id, volume_steps=self._volume_steps)
+                    self._volume_steps = 0
+                    self._state = AtrState.CLOSED
+                    self._log("TP_CLOSE", level="tp2")
+                    return BarOutcome(closed=True, expired=False)
                 trail = self._trail_distance
                 if (self._stage2_trigger > 0 and not self._stage2_active
                         and self._entry_int is not None
@@ -212,14 +249,7 @@ class AtrTrendExecution:
                               width=self._stage2_distance)
                 if self._stage2_active:
                     trail = self._stage2_distance
-                self._advance_sl_to(touch - self.direction * trail)
-                if self._profit_side(touch, self._tp2_int) >= 0:
-                    self._broker.close_volume(
-                        client_order_id=self._oid("tp2_close"),
-                        position_id=self.position_id, volume_steps=self._volume_steps)
-                    self._volume_steps = 0
-                    self._state = AtrState.CLOSED
-                    self._log("TP_CLOSE", level="tp2")
+                self._protect_or_exit(touch - self.direction * trail, candle.c_int)
 
         return BarOutcome(closed=self._state is AtrState.CLOSED, expired=False)
 
